@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/inference",
+    "crates/viz",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Internal crates
+embedding-core = { path = "crates/core" }
+embedding-inference = { path = "crates/inference" }
+embedding-viz = { path = "crates/viz" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Math / linear algebra
+nalgebra = "0.33"
+
+# LLM inference
+denkwerk = { git = "https://github.com/Force67/denkwerk" }

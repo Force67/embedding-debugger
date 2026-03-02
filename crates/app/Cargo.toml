@@ -1,0 +1,20 @@
+[package]
+name = "embedding-debugger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "embedding-debugger"
+path = "src/main.rs"
+
+[dependencies]
+embedding-core = { workspace = true }
+embedding-inference = { workspace = true }
+embedding-viz = { workspace = true }
+
+iced = { version = "0.12", features = ["tokio"] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

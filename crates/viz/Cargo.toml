@@ -1,0 +1,11 @@
+[package]
+name = "embedding-viz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+embedding-core = { workspace = true }
+iced = { version = "0.12", features = ["wgpu"] }
+iced_core = "0.12"
+nalgebra = { workspace = true }
