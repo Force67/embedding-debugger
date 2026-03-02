@@ -1,7 +1,7 @@
 use iced::widget::{column, container, row};
 use iced::{Application, Command, Element, Length, Theme, Color};
 
-use embedding_core::{EmbeddingSet, ProjectedPoint, Projector, TokenCollection};
+use embedding_core::{EmbeddingSet, ProjectedPoint, Projector, Token, TokenCollection};
 use embedding_inference::{EmbeddingClient, ProviderConfig, ProviderKind};
 use embedding_viz::PointCloud;
 
@@ -43,6 +43,10 @@ pub enum Message {
     // -- Token loading --
     LoadTokensPressed,
     TokensLoaded(Result<TokenCollection, String>),
+    /// User edited the free-text token field.
+    TokensTextChanged(String),
+    /// Parse and use whatever is in the text field.
+    UseTypedTokens,
 
     // -- Embedding generation --
     GeneratePressed,
@@ -132,9 +136,40 @@ impl Application for App {
 
             // -- Token loading --
             Message::LoadTokensPressed => {
-                self.status = "Loading tokens...".into();
-                // TODO: Open a file dialog (rfd) and load tokens.
-                Command::none()
+                Command::perform(
+                    async {
+                        let handle = rfd::AsyncFileDialog::new()
+                            .set_title("Open token file")
+                            .add_filter("Token files", &["json", "txt"])
+                            .add_filter("All files", &["*"])
+                            .pick_file()
+                            .await;
+
+                        match handle {
+                            None => Err("No file selected.".to_string()),
+                            Some(h) => {
+                                let path = h.path().to_path_buf();
+                                let ext = path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .unwrap_or("");
+                                if ext == "json" {
+                                    TokenCollection::from_json_file(&path)
+                                        .map_err(|e| e.to_string())
+                                } else {
+                                    let name = path
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("tokens")
+                                        .to_string();
+                                    TokenCollection::from_text_file(&path, name)
+                                        .map_err(|e| e.to_string())
+                                }
+                            }
+                        }
+                    },
+                    Message::TokensLoaded,
+                )
             }
             Message::TokensLoaded(result) => {
                 match result {
@@ -144,11 +179,39 @@ impl Application for App {
                             collection.len(),
                             collection.name
                         );
+                        // Mirror into the text field so the user can see/edit.
+                        self.sidebar.tokens_text = collection.texts().join(", ");
                         self.tokens = Some(collection);
                     }
                     Err(e) => {
                         self.status = format!("Failed to load tokens: {e}");
                     }
+                }
+                Command::none()
+            }
+            Message::TokensTextChanged(s) => {
+                self.sidebar.tokens_text = s;
+                Command::none()
+            }
+            Message::UseTypedTokens => {
+                let raw = self.sidebar.tokens_text.clone();
+                // Split on commas or newlines, trim whitespace, drop empty.
+                let tokens: Vec<embedding_core::Token> = raw
+                    .split([',', '\n'])
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(embedding_core::Token::new)
+                    .collect();
+                if tokens.is_empty() {
+                    self.status = "No tokens found in the input field.".into();
+                } else {
+                    let count = tokens.len();
+                    let mut col = TokenCollection::new("Manual");
+                    for t in tokens {
+                        col.push(t);
+                    }
+                    self.tokens = Some(col);
+                    self.status = format!("Using {count} tokens from text input.");
                 }
                 Command::none()
             }

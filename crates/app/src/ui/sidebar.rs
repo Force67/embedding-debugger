@@ -16,6 +16,8 @@ pub struct SidebarState {
     pub endpoint_input: String,
     /// Azure: deployment name
     pub deployment_input: String,
+    /// Comma- or newline-separated tokens typed/pasted directly.
+    pub tokens_text: String,
 }
 
 const PROVIDERS: &[&str] = &["OpenRouter", "OpenAI", "Azure"];
@@ -47,9 +49,21 @@ pub fn view<'a>(
         .on_input(Message::DimensionsChanged)
         .width(Length::Fill);
 
-    let load_button = button(text("Load Tokens"))
+    let load_button = button(text("📂 Load from file"))
         .on_press(Message::LoadTokensPressed)
         .width(Length::Fill);
+
+    let tokens_input = text_input("dog, cat, apple, king… (comma/newline)", &state.tokens_text)
+        .on_input(Message::TokensTextChanged)
+        .width(Length::Fill);
+
+    let use_tokens_button = if state.tokens_text.trim().is_empty() {
+        button(text("Use typed tokens")).width(Length::Fill)
+    } else {
+        button(text("Use typed tokens"))
+            .on_press(Message::UseTypedTokens)
+            .width(Length::Fill)
+    };
 
     let token_info = match tokens {
         Some(collection) => {
@@ -112,7 +126,9 @@ pub fn view<'a>(
         text("Dimensions").size(14),
         dims_input,
         Space::with_height(16),
-        text("Token Collection").size(16),
+        text("Tokens").size(16),
+        tokens_input,
+        use_tokens_button,
         load_button,
         token_info,
         Space::with_height(16),
