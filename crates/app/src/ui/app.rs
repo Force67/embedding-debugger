@@ -1,9 +1,9 @@
 use iced::widget::{column, container, row};
 use iced::{Application, Command, Element, Length, Theme, Color};
 
-use embedding_core::{EmbeddingSet, ProjectedPoint, Projector, Token, TokenCollection};
+use embedding_core::{EmbeddingSet, ProjectedPoint, Projector, TokenCollection};
 use embedding_inference::{EmbeddingClient, ProviderConfig, ProviderKind};
-use embedding_viz::PointCloud;
+use embedding_viz::{ArcballCamera, PointCloud, PointSelection};
 
 use super::sidebar;
 use super::status_bar;
@@ -27,6 +27,18 @@ pub struct App {
     pub status: String,
     /// Whether an embedding request is in flight.
     pub loading: bool,
+    /// Currently selected point info (if any).
+    pub selected_point: Option<SelectedPointInfo>,
+    /// Mirrored camera state from the viewer (for axis indicator).
+    pub viewer_camera: ArcballCamera,
+}
+
+/// Information about a selected point (resolved with token label).
+#[derive(Debug, Clone)]
+pub struct SelectedPointInfo {
+    pub index: usize,
+    pub label: String,
+    pub position: [f32; 3],
 }
 
 /// Messages that can be sent to update the application.
@@ -53,9 +65,8 @@ pub enum Message {
     EmbeddingsGenerated(Result<EmbeddingSet, String>),
 
     // -- Viewer interaction --
-    CameraRotate { dx: f32, dy: f32 },
-    CameraZoom(f32),
-    CameraPan { dx: f32, dy: f32 },
+    PointSelected(Option<PointSelection>),
+    ViewerCameraChanged(ArcballCamera),
 
     // -- Misc --
     Noop,
@@ -77,6 +88,8 @@ impl Application for App {
             sidebar: sidebar::SidebarState::default(),
             status: "Ready — load a token collection to get started.".into(),
             loading: false,
+            selected_point: None,
+            viewer_camera: ArcballCamera::default(),
         };
         (app, Command::none())
     }
@@ -276,17 +289,24 @@ impl Application for App {
                 Command::none()
             }
 
-            // -- Camera controls --
-            Message::CameraRotate { dx, dy } => {
-                self.point_cloud.camera.rotate(dx * 0.01, dy * 0.01);
+            // -- Viewer interaction --
+            Message::PointSelected(sel) => {
+                self.selected_point = sel.map(|s| {
+                    let label = self.tokens
+                        .as_ref()
+                        .and_then(|tc| tc.tokens.get(s.index))
+                        .map(|t| t.text.clone())
+                        .unwrap_or_else(|| format!("Point {}", s.index));
+                    SelectedPointInfo {
+                        index: s.index,
+                        label,
+                        position: s.position,
+                    }
+                });
                 Command::none()
             }
-            Message::CameraZoom(delta) => {
-                self.point_cloud.camera.zoom(delta * 0.1);
-                Command::none()
-            }
-            Message::CameraPan { dx, dy } => {
-                self.point_cloud.camera.pan(dx * 0.005, dy * 0.005);
+            Message::ViewerCameraChanged(cam) => {
+                self.viewer_camera = cam;
                 Command::none()
             }
 
@@ -296,7 +316,12 @@ impl Application for App {
 
     fn view(&self) -> Element<'_, Message> {
         let sidebar = sidebar::view(&self.sidebar, &self.tokens, self.loading);
-        let viewer = viewer::view(&self.point_cloud, &self.embeddings);
+        let viewer = viewer::view(
+            &self.point_cloud,
+            &self.embeddings,
+            &self.selected_point,
+            &self.viewer_camera,
+        );
         let status = status_bar::view(&self.status);
 
         let main_content = row![

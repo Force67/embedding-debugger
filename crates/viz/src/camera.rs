@@ -52,6 +52,19 @@ impl ArcballCamera {
         )
     }
 
+    /// Camera-local right vector (world space).
+    pub fn right(&self) -> Vector3<f32> {
+        let forward = (self.target - self.eye()).normalize();
+        forward.cross(&Vector3::y()).normalize()
+    }
+
+    /// Camera-local up vector (world space).
+    pub fn up(&self) -> Vector3<f32> {
+        let forward = (self.target - self.eye()).normalize();
+        let right = forward.cross(&Vector3::y()).normalize();
+        right.cross(&forward).normalize()
+    }
+
     /// Compute the view matrix (world → camera space).
     pub fn view_matrix(&self) -> Matrix4<f32> {
         let eye = self.eye();
@@ -79,16 +92,35 @@ impl ArcballCamera {
         );
     }
 
-    /// Zoom in or out by a factor. Positive = zoom in.
+    /// Logarithmic zoom — consistent feel at all distances.
+    /// Positive `delta` zooms in.
     pub fn zoom(&mut self, delta: f32) {
-        self.distance = (self.distance - delta).clamp(0.1, 50.0);
+        let factor = (-delta * 0.15).exp();
+        self.distance = (self.distance * factor).clamp(0.05, 100.0);
     }
 
     /// Pan the camera target in the camera's local XY plane.
     pub fn pan(&mut self, dx: f32, dy: f32) {
-        let forward = (self.target - self.eye()).normalize();
-        let right = forward.cross(&Vector3::y()).normalize();
-        let up = right.cross(&forward).normalize();
+        let right = self.right();
+        let up = self.up();
         self.target += right * dx + up * dy;
+    }
+
+    /// Reset the camera to its default state.
+    pub fn reset(&mut self) {
+        *self = Self {
+            aspect: self.aspect,
+            ..Self::default()
+        };
+    }
+
+    /// Project a world-space axis direction into view space.
+    /// Returns `[right, up, depth]` where right/up are screen directions
+    /// and depth is the toward/away component (positive = toward viewer).
+    pub fn project_axis(&self, axis: [f32; 3]) -> [f32; 3] {
+        let view = self.view_matrix();
+        let v = view.transform_vector(&Vector3::new(axis[0], axis[1], axis[2]));
+        // In RH view space: +x = right, +y = up, +z = toward viewer (behind camera).
+        [v.x, v.y, v.z]
     }
 }

@@ -3,8 +3,11 @@ use embedding_core::projection::ProjectedPoint;
 use iced::event::Status;
 use iced::widget::shader;
 use iced::widget::shader::wgpu;
-use iced::{Color, Point, Rectangle, Size, mouse};
+use iced::{Color, Point, Rectangle, Size, mouse, keyboard};
 use iced_core::window;
+use nalgebra::Vector4;
+
+use std::time::Instant;
 
 use crate::camera::ArcballCamera;
 
@@ -56,6 +59,26 @@ impl PointCloud {
             })
             .collect();
     }
+}
+
+// ─── Viewer events ────────────────────────────────────────────────────────────
+
+/// Events emitted by the 3D viewer back to the application.
+#[derive(Debug, Clone)]
+pub enum ViewerEvent {
+    /// A point was clicked (or deselected if `None`).
+    PointSelected(Option<PointSelection>),
+    /// The camera orientation changed.
+    CameraChanged(ArcballCamera),
+}
+
+/// Information about a selected point.
+#[derive(Debug, Clone)]
+pub struct PointSelection {
+    /// Index back into the original embedding set.
+    pub index: usize,
+    /// World-space position.
+    pub position: [f32; 3],
 }
 
 // ─── GPU vertex / uniform types ───────────────────────────────────────────────
@@ -140,7 +163,6 @@ struct VertOut {
     @builtin(position) clip_pos : vec4<f32>,
     @location(0)       color    : vec4<f32>,
     @location(1)       uv       : vec2<f32>,
-    // Depth fog factor [0.15, 1.0] – interpolated per-fragment.
     @location(2)       fog      : f32,
 }
 
@@ -150,9 +172,8 @@ fn vs_main(in: VertIn) -> VertOut {
 
     let cc = u.view_proj * vec4<f32>(in.world_pos, 1.0);
 
-    // Perspective size attenuation: nearer points appear slightly larger.
-    // cc.w ≈ eye-space depth (grows with distance).
-    let depth_attn = clamp(1.8 / max(0.4, cc.w * 0.5), 0.65, 3.0);
+    // Perspective size attenuation with slightly stronger scaling.
+    let depth_attn = clamp(2.0 / max(0.3, cc.w * 0.45), 0.6, 3.5);
     let sz = in.point_size * depth_attn;
 
     let rx = sz * 2.0 / u.viewport.x * cc.w;
@@ -166,50 +187,65 @@ fn vs_main(in: VertIn) -> VertOut {
     );
     out.color = in.color;
     out.uv    = in.quad_offset;
-    // Exponential depth fog – distant points fade into the void.
-    out.fog   = clamp(exp(-cc.w * 0.4), 0.15, 1.0);
+    out.fog   = clamp(exp(-cc.w * 0.35), 0.12, 1.0);
     return out;
 }
 
 @fragment
 fn fs_main(in: VertOut) -> @location(0) vec4<f32> {
-    let d  = length(in.uv);
+    let d = length(in.uv);
     if d > 1.0 { discard; }
-    let d2 = d * d;
 
-    // ── Layer 1: Gaussian hot core (tiny bright center) ───────────────────
-    let core = exp(-d2 * 28.0);
+    let base = in.color.rgb;
+    let sphere_r = 0.7;
 
-    // ── Layer 2: Solid colored body ───────────────────────────────────────
-    let body = 1.0 - smoothstep(0.0, 0.58, d);
+    var rgb: vec3<f32>;
+    var alpha: f32;
 
-    // ── Layer 3: Soft outer corona – the "drippy" glow halo ──────────────
-    // pow gives a smooth gradient that bleeds outward like liquid light.
-    let halo = pow(max(0.0, 1.0 - d), 2.2) * 0.55;
+    if d <= sphere_r {
+        // ── Sphere impostor: compute normal from billboard UV ─────────────
+        let s = d / sphere_r;
+        let nz = sqrt(max(0.0, 1.0 - s * s));
+        let normal = normalize(vec3<f32>(in.uv.x / sphere_r, in.uv.y / sphere_r, nz));
 
-    // ── Total alpha ───────────────────────────────────────────────────────
-    let alpha = clamp(core + body * 0.88 + halo * 0.4, 0.0, 1.0);
+        // Two-light rig for richer shading.
+        let key_dir  = normalize(vec3<f32>(0.5, 0.8, 0.6));
+        let fill_dir = normalize(vec3<f32>(-0.4, -0.1, 0.7));
+        let view_dir = vec3<f32>(0.0, 0.0, 1.0);
 
-    // ── Color composition ─────────────────────────────────────────────────
-    // Hypersaturate the base color for a vivid liquid-neon look.
-    let gray     = dot(in.color.rgb, vec3<f32>(0.299, 0.587, 0.114));
-    let vivid    = clamp(mix(vec3<f32>(gray), in.color.rgb, 1.45), vec3<f32>(0.0), vec3<f32>(1.0));
+        // Diffuse (wrapped slightly for softer falloff).
+        let key_diff  = max(dot(normal, key_dir), 0.0);
+        let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.25;
 
-    let halo_rgb = vivid * 0.5;                   // dim outer bleed
-    let core_rgb = vec3<f32>(1.0, 0.97, 0.88);    // warm white-hot center
+        // Blinn-Phong specular highlight.
+        let half_v = normalize(key_dir + view_dir);
+        let spec   = pow(max(dot(normal, half_v), 0.0), 64.0);
 
-    // Blend: halo → vivid body → white-hot core
-    let body_w = clamp(body * 0.88 / max(0.001, alpha), 0.0, 1.0);
-    let core_w = clamp(core          / max(0.001, alpha), 0.0, 1.0);
-    var rgb    = mix(halo_rgb, vivid, body_w);
-    rgb        = mix(rgb, core_rgb, core_w * 0.78);
+        // Fresnel rim gives silhouette definition.
+        let fresnel = pow(1.0 - max(dot(normal, view_dir), 0.0), 3.0);
+
+        // Ambient occlusion hint — darken edges.
+        let ao = smoothstep(0.0, 0.35, nz) * 0.45 + 0.55;
+
+        let ambient = 0.14;
+        rgb = base * (ambient + key_diff * 0.68 + fill_diff) * ao
+            + vec3<f32>(1.0) * spec * 0.50
+            + base * fresnel * 0.22;
+
+        // Anti-alias the sphere edge.
+        alpha = smoothstep(sphere_r, sphere_r - 0.025, d);
+    } else {
+        // ── Soft glow halo around the sphere ──────────────────────────────
+        let t    = (d - sphere_r) / (1.0 - sphere_r);
+        let glow = pow(max(0.0, 1.0 - t), 2.6) * 0.30;
+        rgb   = base * 0.45;
+        alpha = glow;
+    }
 
     // ── Depth fog: distant points dissolve into dark space ────────────────
     rgb = mix(vec3<f32>(0.03, 0.03, 0.09), rgb, in.fog);
 
     // ── Premultiplied alpha output ────────────────────────────────────────
-    // With PREMULTIPLIED_ALPHA_BLENDING (src=ONE, dst=ONE_MINUS_SRC_ALPHA),
-    // overlapping halos add their light together – true glow accumulation.
     return vec4<f32>(rgb * alpha, alpha);
 }
 "#;
@@ -217,12 +253,17 @@ fn fs_main(in: VertOut) -> @location(0) vec4<f32> {
 // ─── wgpu render pipeline wrapper ────────────────────────────────────────────
 
 struct GpuPipeline {
-    pipeline:     wgpu::RenderPipeline,
-    uniform_buf:  wgpu::Buffer,
-    vertex_buf:   wgpu::Buffer,
-    bind_group:   wgpu::BindGroup,
-    vertex_count: u32,
+    pipeline:       wgpu::RenderPipeline,
+    uniform_buf:    wgpu::Buffer,
+    vertex_buf:     wgpu::Buffer,
+    bind_group:     wgpu::BindGroup,
+    vertex_count:   u32,
+    // Depth buffer for proper occlusion.
+    depth_view:     Option<wgpu::TextureView>,
+    depth_size:     (u32, u32),
 }
+
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 impl GpuPipeline {
     fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
@@ -242,7 +283,7 @@ impl GpuPipeline {
             label:   Some("point_cloud::bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding:    0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty:         wgpu::BindingType::Buffer {
                     ty:                 wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -327,7 +368,13 @@ impl GpuPipeline {
                     cull_mode: None,
                     ..Default::default()
                 },
-                depth_stencil: None,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format:              DEPTH_FORMAT,
+                    depth_write_enabled: true,
+                    depth_compare:       wgpu::CompareFunction::LessEqual,
+                    stencil:             wgpu::StencilState::default(),
+                    bias:                wgpu::DepthBiasState::default(),
+                }),
                 multisample:   wgpu::MultisampleState::default(),
                 multiview:     None,
             });
@@ -338,7 +385,31 @@ impl GpuPipeline {
             vertex_buf,
             bind_group,
             vertex_count: 0,
+            depth_view:   None,
+            depth_size:   (0, 0),
         }
+    }
+
+    /// Ensure the depth texture matches the render target size.
+    fn ensure_depth_texture(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if self.depth_size == (width, height) && self.depth_view.is_some() {
+            return;
+        }
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label:           Some("point_cloud::depth_tex"),
+            size:            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count:    1,
+            dimension:       wgpu::TextureDimension::D2,
+            format:          DEPTH_FORMAT,
+            usage:           wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats:    &[],
+        });
+        self.depth_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
+        self.depth_size = (width, height);
     }
 
     fn update(
@@ -380,6 +451,11 @@ impl GpuPipeline {
             return;
         }
 
+        let depth_view = match &self.depth_view {
+            Some(v) => v,
+            None => return,
+        };
+
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label:                    Some("point_cloud::pass"),
             color_attachments:        &[Some(wgpu::RenderPassColorAttachment {
@@ -390,11 +466,26 @@ impl GpuPipeline {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view:       depth_view,
+                depth_ops:  Some(wgpu::Operations {
+                    load:  wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes:         None,
             occlusion_query_set:      None,
         });
 
+        pass.set_viewport(
+            viewport.x as f32,
+            viewport.y as f32,
+            viewport.width as f32,
+            viewport.height as f32,
+            0.0,
+            1.0,
+        );
         pass.set_scissor_rect(
             viewport.x,
             viewport.y,
@@ -424,7 +515,7 @@ impl shader::Primitive for PointCloudPrimitive {
         device:       &wgpu::Device,
         queue:        &wgpu::Queue,
         bounds:       Rectangle,
-        _target_size: Size<u32>,
+        target_size:  Size<u32>,
         scale_factor: f32,
         storage:      &mut shader::Storage,
     ) {
@@ -432,6 +523,9 @@ impl shader::Primitive for PointCloudPrimitive {
             storage.store(GpuPipeline::new(device, format));
         }
         let gpu = storage.get_mut::<GpuPipeline>().unwrap();
+
+        // Ensure the depth texture matches the render target size.
+        gpu.ensure_depth_texture(device, target_size.width, target_size.height);
 
         // Re-derive projection with the correct aspect ratio for this frame.
         let mut cam   = self.camera.clone();
@@ -476,6 +570,50 @@ fn dist_sq(a: &[f32; 3], b: &[f32; 3]) -> f32 {
     dx * dx + dy * dy + dz * dz
 }
 
+// ─── Point picking ────────────────────────────────────────────────────────────
+
+/// Screen-space picking radius in pixels.
+const PICK_THRESHOLD: f32 = 20.0;
+/// Minimum cursor movement (px) before a click is treated as a drag.
+const DRAG_THRESHOLD: f32 = 4.0;
+
+/// Find the closest point to `click` in screen space, if any.
+fn pick_point(
+    camera: &ArcballCamera,
+    points: &[PointData],
+    click:  Point,
+    bounds: Rectangle,
+) -> Option<usize> {
+    let mut cam = camera.clone();
+    cam.aspect = if bounds.height > 0.0 { bounds.width / bounds.height } else { 1.0 };
+    let vp = cam.view_projection();
+
+    let threshold_sq = PICK_THRESHOLD * PICK_THRESHOLD;
+    let mut best: Option<usize> = None;
+    let mut best_d2 = threshold_sq;
+
+    for (i, p) in points.iter().enumerate() {
+        let clip = vp * Vector4::new(p.position[0], p.position[1], p.position[2], 1.0);
+        if clip.w <= 0.001 { continue; }
+
+        let ndc_x = clip.x / clip.w;
+        let ndc_y = clip.y / clip.w;
+
+        let sx = (ndc_x + 1.0) * 0.5 * bounds.width  + bounds.x;
+        let sy = (1.0 - ndc_y) * 0.5 * bounds.height + bounds.y;
+
+        let dx = sx - click.x;
+        let dy = sy - click.y;
+        let d2 = dx * dx + dy * dy;
+
+        if d2 < best_d2 {
+            best = Some(i);
+            best_d2 = d2;
+        }
+    }
+    best
+}
+
 // ─── iced Shader Program ─────────────────────────────────────────────────────
 
 /// iced `Shader` program that drives the point cloud.
@@ -490,20 +628,39 @@ pub struct PointCloudProgram {
 // ── Per-widget interaction state (persists across frames) ──
 
 /// Tracks the camera and mouse-drag state for the shader widget.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct InteractionState {
     pub camera: ArcballCamera,
     drag:       Option<DragState>,
+    /// Timestamp of last click for double-click detection.
+    last_click: Option<Instant>,
+    /// Currently selected point (by embedding index).
+    pub selected: Option<usize>,
 }
+
+impl Default for InteractionState {
+    fn default() -> Self {
+        Self {
+            camera:     ArcballCamera::default(),
+            drag:       None,
+            last_click: None,
+            selected:   None,
+        }
+    }
+}
+
+/// Double-click threshold in milliseconds.
+const DOUBLE_CLICK_MS: u128 = 350;
 
 #[derive(Debug, Clone)]
 struct DragState {
-    button:   mouse::Button,
-    /// Last cursor position in *window* coordinates (absolute).
-    last_pos: Point,
+    button:    mouse::Button,
+    start_pos: Point,
+    last_pos:  Point,
+    has_moved: bool,
 }
 
-impl shader::Program<()> for PointCloudProgram {
+impl shader::Program<ViewerEvent> for PointCloudProgram {
     type State     = InteractionState;
     type Primitive = PointCloudPrimitive;
 
@@ -513,16 +670,27 @@ impl shader::Program<()> for PointCloudProgram {
         _cursor: mouse::Cursor,
         _bounds: Rectangle,
     ) -> Self::Primitive {
-        // Sort back-to-front (Painter's Algorithm) so near points alpha-blend
-        // correctly over far ones, giving proper 3-D depth ordering.
         let eye = state.camera.eye();
         let eye_pos = [eye.x, eye.y, eye.z];
 
         let mut sorted = self.cloud.points.clone();
+
+        // Highlight the selected point (bigger + brighter).
+        if let Some(sel_idx) = state.selected {
+            if let Some(p) = sorted.iter_mut().find(|p| p.index == sel_idx) {
+                p.size *= 1.8;
+                p.color = [
+                    (p.color[0] * 0.5 + 0.5).min(1.0),
+                    (p.color[1] * 0.5 + 0.5).min(1.0),
+                    (p.color[2] * 0.5 + 0.5).min(1.0),
+                    p.color[3],
+                ];
+            }
+        }
+
         sorted.sort_unstable_by(|a, b| {
             let da = dist_sq(&a.position, &eye_pos);
             let db = dist_sq(&b.position, &eye_pos);
-            // Reverse order: largest distance first (drawn first = underneath).
             db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
         });
 
@@ -538,71 +706,182 @@ impl shader::Program<()> for PointCloudProgram {
         event:  shader::Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-        shell:  &mut iced_core::Shell<'_, ()>,
-    ) -> (Status, Option<()>) {
-        let shader::Event::Mouse(mouse_event) = event else {
-            return (Status::Ignored, None);
-        };
+        shell:  &mut iced_core::Shell<'_, ViewerEvent>,
+    ) -> (Status, Option<ViewerEvent>) {
+        match event {
+            // ── Mouse events ──────────────────────────────────────────────
+            shader::Event::Mouse(mouse_event) => match mouse_event {
+                mouse::Event::ButtonPressed(btn) => {
+                    if let Some(abs) = cursor.position() {
+                        if cursor.is_over(bounds) {
+                            // Double-click → reset camera.
+                            if btn == mouse::Button::Left {
+                                let now = Instant::now();
+                                if let Some(prev) = state.last_click {
+                                    if now.duration_since(prev).as_millis() < DOUBLE_CLICK_MS {
+                                        state.camera.reset();
+                                        state.last_click = None;
+                                        shell.request_redraw(window::RedrawRequest::NextFrame);
+                                        return (Status::Captured, Some(ViewerEvent::CameraChanged(state.camera.clone())));
+                                    }
+                                }
+                                state.last_click = Some(now);
+                            }
 
-        match mouse_event {
-            // ── Start drag ──
-            mouse::Event::ButtonPressed(btn) => {
-                if let Some(abs) = cursor.position() {
-                    if cursor.is_over(bounds) {
-                        state.drag = Some(DragState { button: btn, last_pos: abs });
+                            state.drag = Some(DragState {
+                                button:    btn,
+                                start_pos: abs,
+                                last_pos:  abs,
+                                has_moved: false,
+                            });
+                            shell.request_redraw(window::RedrawRequest::NextFrame);
+                            return (Status::Captured, None);
+                        }
+                    }
+                    (Status::Ignored, None)
+                }
+
+                mouse::Event::ButtonReleased(_) => {
+                    if let Some(drag) = state.drag.take() {
+                        // Left-click without movement → point picking.
+                        if drag.button == mouse::Button::Left && !drag.has_moved {
+                            if let Some(vec_idx) = pick_point(
+                                &state.camera,
+                                &self.cloud.points,
+                                drag.start_pos,
+                                bounds,
+                            ) {
+                                let point = &self.cloud.points[vec_idx];
+                                state.selected = Some(point.index);
+                                shell.request_redraw(window::RedrawRequest::NextFrame);
+                                return (Status::Captured, Some(ViewerEvent::PointSelected(
+                                    Some(PointSelection {
+                                        index:    point.index,
+                                        position: point.position,
+                                    })
+                                )));
+                            } else {
+                                // Clicked empty space → deselect.
+                                if state.selected.is_some() {
+                                    state.selected = None;
+                                    shell.request_redraw(window::RedrawRequest::NextFrame);
+                                    return (Status::Captured, Some(ViewerEvent::PointSelected(None)));
+                                }
+                            }
+                        } else if drag.has_moved {
+                            return (Status::Captured, Some(ViewerEvent::CameraChanged(state.camera.clone())));
+                        }
+                        return (Status::Captured, None);
+                    }
+                    (Status::Ignored, None)
+                }
+
+                mouse::Event::CursorMoved { position } => {
+                    if let Some(ref mut drag) = state.drag {
+                        let dx = position.x - drag.last_pos.x;
+                        let dy = position.y - drag.last_pos.y;
+                        drag.last_pos = position;
+
+                        let total_dx = position.x - drag.start_pos.x;
+                        let total_dy = position.y - drag.start_pos.y;
+                        if total_dx * total_dx + total_dy * total_dy > DRAG_THRESHOLD * DRAG_THRESHOLD {
+                            drag.has_moved = true;
+                        }
+
+                        if drag.has_moved {
+                            match drag.button {
+                                mouse::Button::Left => {
+                                    state.camera.rotate(dx * 0.005, dy * 0.005);
+                                }
+                                mouse::Button::Right | mouse::Button::Middle => {
+                                    let scale = state.camera.distance * 0.0018;
+                                    state.camera.pan(dx * scale, -dy * scale);
+                                }
+                                _ => {}
+                            }
+                            shell.request_redraw(window::RedrawRequest::NextFrame);
+                            return (Status::Captured, Some(ViewerEvent::CameraChanged(state.camera.clone())));
+                        }
+
                         shell.request_redraw(window::RedrawRequest::NextFrame);
                         return (Status::Captured, None);
                     }
+                    (Status::Ignored, None)
                 }
-            }
 
-            // ── End drag ──
-            mouse::Event::ButtonReleased(_) => {
-                if state.drag.take().is_some() {
-                    return (Status::Captured, None);
+                mouse::Event::WheelScrolled { delta } => {
+                    if cursor.is_over(bounds) {
+                        let scroll = match delta {
+                            mouse::ScrollDelta::Lines  { y, .. } => y,
+                            mouse::ScrollDelta::Pixels { y, .. } => y * 0.02,
+                        };
+                        state.camera.zoom(scroll * 2.5);
+                        shell.request_redraw(window::RedrawRequest::NextFrame);
+                        return (Status::Captured, Some(ViewerEvent::CameraChanged(state.camera.clone())));
+                    }
+                    (Status::Ignored, None)
                 }
-            }
 
-            // ── Drag motion → rotate or pan ──
-            mouse::Event::CursorMoved { position } => {
-                if let Some(ref mut drag) = state.drag {
-                    let dx = position.x - drag.last_pos.x;
-                    let dy = position.y - drag.last_pos.y;
-                    drag.last_pos = position;
+                _ => (Status::Ignored, None),
+            },
 
-                    match drag.button {
-                        mouse::Button::Left => {
-                            state.camera.rotate(dx * 0.005, dy * 0.005);
-                        }
-                        mouse::Button::Right | mouse::Button::Middle => {
-                            let scale = state.camera.distance * 0.002;
-                            state.camera.pan(dx * scale, -dy * scale);
-                        }
-                        _ => {}
+            // ── Keyboard events ───────────────────────────────────────────
+            shader::Event::Keyboard(kb_event) => {
+                if let keyboard::Event::KeyPressed { key, .. } = kb_event {
+                    if !cursor.is_over(bounds) {
+                        return (Status::Ignored, None);
                     }
 
-                    shell.request_redraw(window::RedrawRequest::NextFrame);
-                    return (Status::Captured, None);
-                }
-            }
+                    let pan_step = state.camera.distance * 0.04;
+                    let rot_step = 0.06_f32;
 
-            // ── Scroll → zoom ──
-            mouse::Event::WheelScrolled { delta } => {
-                if cursor.is_over(bounds) {
-                    let scroll = match delta {
-                        mouse::ScrollDelta::Lines  { y, .. } => y,
-                        mouse::ScrollDelta::Pixels { y, .. } => y * 0.02,
+                    let handled = match &key {
+                        keyboard::Key::Character(c) => match c.as_str() {
+                            "w" => { state.camera.pan(0.0, pan_step); true }
+                            "s" => { state.camera.pan(0.0, -pan_step); true }
+                            "a" => { state.camera.pan(-pan_step, 0.0); true }
+                            "d" => { state.camera.pan(pan_step, 0.0); true }
+                            "q" => { state.camera.zoom(3.0); true }
+                            "e" => { state.camera.zoom(-3.0); true }
+                            "r" => { state.camera.reset(); true }
+                            "f" => {
+                                // Focus: reset target to origin, keep orientation.
+                                state.camera.target = nalgebra::Point3::origin();
+                                true
+                            }
+                            _ => false,
+                        },
+                        keyboard::Key::Named(named) => {
+                            use keyboard::key::Named as N;
+                            match named {
+                                N::ArrowUp    => { state.camera.rotate(0.0, -rot_step); true }
+                                N::ArrowDown  => { state.camera.rotate(0.0,  rot_step); true }
+                                N::ArrowLeft  => { state.camera.rotate(-rot_step, 0.0); true }
+                                N::ArrowRight => { state.camera.rotate( rot_step, 0.0); true }
+                                N::Escape => {
+                                    if state.selected.is_some() {
+                                        state.selected = None;
+                                        shell.request_redraw(window::RedrawRequest::NextFrame);
+                                        return (Status::Captured, Some(ViewerEvent::PointSelected(None)));
+                                    }
+                                    false
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => false,
                     };
-                    state.camera.zoom(-scroll * 0.35);
-                    shell.request_redraw(window::RedrawRequest::NextFrame);
-                    return (Status::Captured, None);
+
+                    if handled {
+                        shell.request_redraw(window::RedrawRequest::NextFrame);
+                        return (Status::Captured, Some(ViewerEvent::CameraChanged(state.camera.clone())));
+                    }
                 }
+                (Status::Ignored, None)
             }
 
-            _ => {}
+            _ => (Status::Ignored, None),
         }
-
-        (Status::Ignored, None)
     }
 
     fn mouse_interaction(

@@ -9,3 +9,4 @@ embedding-core = { workspace = true }
 iced = { version = "0.12", features = ["wgpu"] }
 iced_core = "0.12"
 nalgebra = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }
