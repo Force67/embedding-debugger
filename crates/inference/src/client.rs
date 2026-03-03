@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use embedding_core::{Embedding, EmbeddingSet};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -63,7 +63,21 @@ impl EmbeddingClient {
         }
     }
 
-    // ---- Azure OpenAI (including Azure AI Foundry endpoints) ----------------
+    // ---- Azure OpenAI (both traditional and Azure AI Foundry endpoints) ------
+    //
+    // Two supported URL styles:
+    //
+    //  a) New-style / OpenAI-compatible (Azure AI Foundry, cognitiveservices.azure.com):
+    //       https://<resource>.cognitiveservices.azure.com/openai/v1/
+    //       → POST {endpoint}/embeddings
+    //       → model sent in request body as deployment name
+    //
+    //  b) Traditional Azure OpenAI (*.openai.azure.com):
+    //       https://<resource>.openai.azure.com/
+    //       → POST {endpoint}/openai/deployments/{deployment}/embeddings?api-version=2024-02-01
+    //       → deployment encoded in URL, model field still echoed in body
+    //
+    // Both accept the `api-key` header for API-key authentication.
 
     async fn embed_azure(&self, texts: &[&str]) -> Result<EmbeddingSet> {
         let endpoint = self
@@ -85,9 +99,20 @@ impl EmbeddingClient {
             .as_deref()
             .unwrap_or(self.config.model.as_str());
 
-        // Normalise endpoint: ensure trailing slash, then append `embeddings`.
         let base = endpoint.trim_end_matches('/');
-        let url = format!("{base}/embeddings");
+
+        // Detect endpoint style from the URL.
+        // New-style endpoints contain "/openai/v1" in the path.
+        // Traditional endpoints are bare resource roots (*.openai.azure.com).
+        let url = if base.contains("/openai/v1") {
+            // New Azure AI Foundry / OpenAI-compatible endpoint — append /embeddings.
+            format!("{base}/embeddings")
+        } else {
+            // Traditional Azure OpenAI — deployment goes in the URL path.
+            format!(
+                "{base}/openai/deployments/{deployment}/embeddings?api-version=2024-02-01"
+            )
+        };
 
         let body = EmbedRequest {
             input: texts,
