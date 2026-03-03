@@ -1,7 +1,7 @@
 use iced::widget::{column, container, row};
 use iced::{Application, Command, Element, Length, Theme, Color};
 
-use embedding_core::{EmbeddingSet, ProjectedPoint, Projector, TokenCollection};
+use embedding_core::{EmbeddingSet, ProjectedPoint, ProjectionMethod, Projector, TsneParams, TokenCollection};
 use embedding_inference::{EmbeddingClient, ProviderConfig, ProviderKind};
 use embedding_viz::{ArcballCamera, PointCloud, PointSelection};
 
@@ -27,6 +27,8 @@ pub struct App {
     pub status: String,
     /// Whether an embedding request is in flight.
     pub loading: bool,
+    /// Whether a (potentially slow) projection is running.
+    pub projecting: bool,
     /// Currently selected point info (if any).
     pub selected_point: Option<SelectedPointInfo>,
     /// Mirrored camera state from the viewer (for axis indicator).
@@ -35,6 +37,10 @@ pub struct App {
     pub bubble_size: f32,
     /// Current search query for fuzzy point finding.
     pub search_query: String,
+    /// Which dimensionality-reduction algorithm to use.
+    pub projection_method: ProjectionMethod,
+    /// t-SNE perplexity (5–50).
+    pub tsne_perplexity: f32,
 }
 
 /// Information about a selected point (resolved with token label).
@@ -77,6 +83,12 @@ pub enum Message {
     BubbleSizeChanged(f32),
     /// Search bar text changed — fuzzy-selects the best matching point.
     SearchQueryChanged(String),
+    /// Projection method changed (PCA / t-SNE).
+    ProjectionMethodChanged(String),
+    /// t-SNE perplexity slider changed.
+    PerplexityChanged(f32),
+    /// Async projection finished.
+    ProjectionComplete(Vec<ProjectedPoint>),
 
     // -- Misc --
     Noop,
@@ -98,10 +110,13 @@ impl Application for App {
             sidebar: sidebar::SidebarState::default(),
             status: "Ready — load a token collection to get started.".into(),
             loading: false,
+            projecting: false,
             selected_point: None,
             viewer_camera: ArcballCamera::default(),
             bubble_size: 8.0,
             search_query: String::new(),
+            projection_method: ProjectionMethod::Pca,
+            tsne_perplexity: 30.0,
         };
         (app, Command::none())
     }
@@ -275,24 +290,12 @@ impl Application for App {
                 match result {
                     Ok(set) => {
                         self.status = format!(
-                            "Generated {} embeddings ({}D) — projecting to 3D...",
+                            "Generated {} embeddings ({}D) — projecting to 3D…",
                             set.len(),
                             set.dimensions
                         );
-
-                        let vectors = set.vectors_as_matrix();
-                        let mut projected = Projector::pca(&vectors);
-                        Projector::normalize(&mut projected);
-                        self.projected = projected;
-
-                        let colors = self.category_colors();
-                        self.point_cloud.set_points(&self.projected, &colors);
                         self.embeddings = Some(set);
-
-                        self.status = format!(
-                            "Showing {} points in 3D. Drag to rotate, scroll to zoom.",
-                            self.projected.len()
-                        );
+                        return self.start_projection();
                     }
                     Err(e) => {
                         self.status = format!("Embedding generation failed: {e}");
@@ -351,12 +354,48 @@ impl Application for App {
                 Command::none()
             }
 
+            Message::ProjectionMethodChanged(s) => {
+                self.projection_method = if s == "t-SNE" {
+                    ProjectionMethod::TSne
+                } else {
+                    ProjectionMethod::Pca
+                };
+                self.sidebar.projection_input = s;
+                if self.embeddings.is_some() {
+                    return self.start_projection();
+                }
+                Command::none()
+            }
+
+            Message::PerplexityChanged(v) => {
+                self.tsne_perplexity = v;
+                self.sidebar.perplexity_input = v;
+                Command::none()
+            }
+
+            Message::ProjectionComplete(mut pts) => {
+                self.projecting = false;
+                Projector::normalize(&mut pts);
+                let n = pts.len();
+                self.projected = pts;
+                let colors = self.category_colors();
+                self.point_cloud.set_points(&self.projected, &colors);
+                self.status = format!(
+                    "Showing {n} points in 3D ({method}). Drag to rotate, scroll to zoom.",
+                    method = match self.projection_method {
+                        ProjectionMethod::Pca => "PCA",
+                        ProjectionMethod::TSne => "t-SNE",
+                    }
+                );
+                Command::none()
+            }
+
             Message::Noop => Command::none(),
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let sidebar = sidebar::view(&self.sidebar, &self.tokens, self.loading, self.bubble_size);
+        let sidebar = sidebar::view(&self.sidebar, &self.tokens, self.loading || self.projecting, self.bubble_size);
         let viewer = viewer::view(
             &self.point_cloud,
             &self.embeddings,
@@ -424,6 +463,43 @@ impl App {
                 }
             })
             .collect()
+    }
+
+    /// Launch an async projection task using the current method and embeddings.
+    fn start_projection(&mut self) -> Command<Message> {
+        let set = match &self.embeddings {
+            Some(s) => s,
+            None => return Command::none(),
+        };
+
+        self.projecting = true;
+        let method = self.projection_method;
+        let perplexity = self.tsne_perplexity;
+        // Clone raw vectors so the task is 'static.
+        let raw: Vec<Vec<f32>> = set.embeddings.iter().map(|e| e.vector.clone()).collect();
+
+        self.status = format!(
+            "Projecting with {}…",
+            match method { ProjectionMethod::Pca => "PCA", ProjectionMethod::TSne => "t-SNE" }
+        );
+
+        Command::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let refs: Vec<&[f32]> = raw.iter().map(|v| v.as_slice()).collect();
+                    match method {
+                        ProjectionMethod::Pca => Projector::pca(&refs),
+                        ProjectionMethod::TSne => {
+                            let params = TsneParams { perplexity, ..Default::default() };
+                            Projector::tsne(&refs, &params)
+                        }
+                    }
+                })
+                .await
+                .unwrap_or_default()
+            },
+            Message::ProjectionComplete,
+        )
     }
 }
 

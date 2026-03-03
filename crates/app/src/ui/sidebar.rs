@@ -6,7 +6,7 @@ use embedding_core::TokenCollection;
 use super::app::Message;
 
 /// State for the sidebar UI controls.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SidebarState {
     pub provider_input: String,
     pub model_input: String,
@@ -18,9 +18,30 @@ pub struct SidebarState {
     pub deployment_input: String,
     /// Comma- or newline-separated tokens typed/pasted directly.
     pub tokens_text: String,
+    /// Currently selected projection method label ("PCA" or "t-SNE").
+    pub projection_input: String,
+    /// Current t-SNE perplexity value.
+    pub perplexity_input: f32,
+}
+
+impl Default for SidebarState {
+    fn default() -> Self {
+        Self {
+            provider_input: String::new(),
+            model_input: String::new(),
+            api_key_input: String::new(),
+            dimensions_input: String::new(),
+            endpoint_input: String::new(),
+            deployment_input: String::new(),
+            tokens_text: String::new(),
+            projection_input: "PCA".to_string(),
+            perplexity_input: 30.0,
+        }
+    }
 }
 
 const PROVIDERS: &[&str] = &["OpenRouter", "OpenAI", "Azure"];
+const PROJECTIONS: &[&str] = &["PCA", "t-SNE"];
 
 pub fn view<'a>(
     state: &'a SidebarState,
@@ -73,6 +94,19 @@ pub fn view<'a>(
         None => text("No tokens loaded"),
     };
 
+    let projection_picker = pick_list(
+        PROJECTIONS.to_vec(),
+        Some(if state.projection_input.is_empty() {
+            "PCA"
+        } else {
+            state.projection_input.as_str()
+        }),
+        |s| Message::ProjectionMethodChanged(s.to_string()),
+    )
+    .width(Length::Fill);
+
+    let is_tsne = state.projection_input == "t-SNE";
+
     let generate_button = if loading {
         button(text("Generating...")).width(Length::Fill)
     } else {
@@ -118,7 +152,7 @@ pub fn view<'a>(
         .into()
     };
 
-    let content = column![
+    let mut content = column![
         text("Provider").size(14),
         provider_picker,
         Space::with_height(8),
@@ -135,13 +169,31 @@ pub fn view<'a>(
         Space::with_height(16),
         generate_button,
         Space::with_height(16),
-        text(format!("Bubble Size  {:.0}", bubble_size)).size(14),
-        slider(2.0_f32..=30.0, bubble_size, Message::BubbleSizeChanged)
-            .step(0.5_f32)
-            .width(Length::Fill),
+        text("Projection").size(14),
+        projection_picker,
     ]
     .spacing(4)
     .width(260);
+
+    if is_tsne {
+        content = content.push(Space::with_height(4));
+        content = content.push(
+            text(format!("Perplexity  {:.0}", state.perplexity_input)).size(14),
+        );
+        content = content.push(
+            slider(5.0_f32..=50.0, state.perplexity_input, Message::PerplexityChanged)
+                .step(1.0_f32)
+                .width(Length::Fill),
+        );
+    }
+
+    content = content.push(Space::with_height(16));
+    content = content.push(text(format!("Bubble Size  {:.0}", bubble_size)).size(14));
+    content = content.push(
+        slider(2.0_f32..=30.0, bubble_size, Message::BubbleSizeChanged)
+            .step(0.5_f32)
+            .width(Length::Fill),
+    );
 
     container(content)
         .padding(Padding::from(16))
