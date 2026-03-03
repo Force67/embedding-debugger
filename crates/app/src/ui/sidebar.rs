@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, pick_list, text, text_input, Space};
+use iced::widget::{button, column, container, pick_list, slider, text, text_input, Space};
 use iced::{Element, Length, Padding};
 
 use embedding_core::TokenCollection;
@@ -26,6 +26,7 @@ pub fn view<'a>(
     state: &'a SidebarState,
     tokens: &'a Option<TokenCollection>,
     loading: bool,
+    bubble_size: f32,
 ) -> Element<'a, Message> {
     let is_azure = state.provider_input == "Azure";
 
@@ -133,6 +134,11 @@ pub fn view<'a>(
         token_info,
         Space::with_height(16),
         generate_button,
+        Space::with_height(16),
+        text(format!("Bubble Size  {:.0}", bubble_size)).size(14),
+        slider(2.0_f32..=30.0, bubble_size, Message::BubbleSizeChanged)
+            .step(0.5_f32)
+            .width(Length::Fill),
     ]
     .spacing(4)
     .width(260);

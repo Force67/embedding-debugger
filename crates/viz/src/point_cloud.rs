@@ -34,10 +34,20 @@ impl PointData {
     }
 }
 
+/// A line connecting two points in the visualization.
+#[derive(Debug, Clone, Copy)]
+pub struct LineData {
+    pub start: [f32; 3],
+    pub end: [f32; 3],
+    pub color: [f32; 4],
+}
+
 /// High-level point cloud state stored in the application.
 #[derive(Debug, Clone, Default)]
 pub struct PointCloud {
     pub points: Vec<PointData>,
+    /// Optional lines connecting pairs of points.
+    pub lines: Vec<LineData>,
     /// Kept for API compatibility; the live interactive camera lives in
     /// `InteractionState` inside the shader widget.
     pub camera: ArcballCamera,
@@ -45,7 +55,7 @@ pub struct PointCloud {
 
 impl PointCloud {
     pub fn new(points: Vec<PointData>, camera: ArcballCamera) -> Self {
-        Self { points, camera }
+        Self { points, lines: Vec::new(), camera }
     }
 
     /// Update points from projected embeddings.
@@ -58,6 +68,36 @@ impl PointCloud {
                 PointData::from_projected(p, color, 8.0)
             })
             .collect();
+    }
+
+    /// Set lines connecting points. Each pair `(from, to)` references indices
+    /// into `self.points`. Lines whose endpoints are out of range are silently
+    /// skipped. Pass an empty slice (or `None`-equivalent) to clear all lines.
+    pub fn set_lines(&mut self, pairs: &[(usize, usize)], color: [f32; 4]) {
+        self.lines = pairs
+            .iter()
+            .filter_map(|&(a, b)| {
+                let pa = self.points.get(a)?;
+                let pb = self.points.get(b)?;
+                Some(LineData {
+                    start: pa.position,
+                    end: pb.position,
+                    color,
+                })
+            })
+            .collect();
+    }
+
+    /// Clear all lines.
+    pub fn clear_lines(&mut self) {
+        self.lines.clear();
+    }
+
+    /// Update the render size of every point uniformly.
+    pub fn set_point_size(&mut self, size: f32) {
+        for p in &mut self.points {
+            p.size = size;
+        }
     }
 }
 
@@ -137,6 +177,39 @@ fn expand_to_vertices(points: &[PointData]) -> Vec<GpuVertex> {
                 _pad1:       0.0,
             });
         }
+    }
+    verts
+}
+
+// ─── Line GPU vertex ──────────────────────────────────────────────────────────
+
+/// One vertex for a line segment on the GPU.
+///
+/// Memory layout (stride = 32 bytes, all f32):
+///   offset  0 – 11 : world_pos (vec3)
+///   offset 12 – 15 : _pad0
+///   offset 16 – 31 : color     (vec4)
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+struct GpuLineVertex {
+    world_pos: [f32; 3],
+    _pad0:     f32,
+    color:     [f32; 4],
+}
+
+fn expand_lines(lines: &[LineData]) -> Vec<GpuLineVertex> {
+    let mut verts = Vec::with_capacity(lines.len() * 2);
+    for l in lines {
+        verts.push(GpuLineVertex {
+            world_pos: l.start,
+            _pad0:     0.0,
+            color:     l.color,
+        });
+        verts.push(GpuLineVertex {
+            world_pos: l.end,
+            _pad0:     0.0,
+            color:     l.color,
+        });
     }
     verts
 }
@@ -250,6 +323,46 @@ fn fs_main(in: VertOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+// ─── Line WGSL shader source ─────────────────────────────────────────────────
+
+const LINE_SHADER_SRC: &str = r#"
+struct Uniforms {
+    view_proj : mat4x4<f32>,
+    viewport  : vec2<f32>,
+    _pad      : vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+struct LineVertIn {
+    @location(0) world_pos : vec3<f32>,
+    @location(1) color     : vec4<f32>,
+}
+
+struct LineVertOut {
+    @builtin(position) clip_pos : vec4<f32>,
+    @location(0)       color    : vec4<f32>,
+    @location(1)       fog      : f32,
+}
+
+@vertex
+fn vs_line(in: LineVertIn) -> LineVertOut {
+    var out: LineVertOut;
+    let cc = u.view_proj * vec4<f32>(in.world_pos, 1.0);
+    out.clip_pos = cc;
+    out.color = in.color;
+    out.fog = clamp(exp(-cc.w * 0.35), 0.12, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_line(in: LineVertOut) -> @location(0) vec4<f32> {
+    let rgb = mix(vec3<f32>(0.03, 0.03, 0.09), in.color.rgb, in.fog);
+    let alpha = in.color.a;
+    return vec4<f32>(rgb * alpha, alpha);
+}
+"#;
+
 // ─── wgpu render pipeline wrapper ────────────────────────────────────────────
 
 struct GpuPipeline {
@@ -261,6 +374,10 @@ struct GpuPipeline {
     // Depth buffer for proper occlusion.
     depth_view:     Option<wgpu::TextureView>,
     depth_size:     (u32, u32),
+    // Line rendering resources.
+    line_pipeline:    wgpu::RenderPipeline,
+    line_vertex_buf:  wgpu::Buffer,
+    line_vertex_count: u32,
 }
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -379,6 +496,70 @@ impl GpuPipeline {
                 multiview:     None,
             });
 
+        // ── Line pipeline ────────────────────────────────────────────────
+        let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label:  Some("point_cloud::line_shader"),
+            source: wgpu::ShaderSource::Wgsl(LINE_SHADER_SRC.into()),
+        });
+
+        let line_vert_attrs = [
+            wgpu::VertexAttribute {
+                format:          wgpu::VertexFormat::Float32x3,
+                offset:          0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format:          wgpu::VertexFormat::Float32x4,
+                offset:          16,
+                shader_location: 1,
+            },
+        ];
+
+        let line_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label:  Some("point_cloud::line_rp"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module:      &line_shader,
+                    entry_point: "vs_line",
+                    buffers:     &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<GpuLineVertex>() as u64,
+                        step_mode:    wgpu::VertexStepMode::Vertex,
+                        attributes:   &line_vert_attrs,
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module:      &line_shader,
+                    entry_point: "fs_line",
+                    targets:     &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend:      Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology:  wgpu::PrimitiveTopology::LineList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format:              DEPTH_FORMAT,
+                    depth_write_enabled: true,
+                    depth_compare:       wgpu::CompareFunction::LessEqual,
+                    stencil:             wgpu::StencilState::default(),
+                    bias:                wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview:   None,
+            });
+
+        let line_vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label:              Some("point_cloud::line_vb"),
+            size:               std::mem::size_of::<GpuLineVertex>() as u64 * 2,
+            usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             pipeline,
             uniform_buf,
@@ -387,6 +568,9 @@ impl GpuPipeline {
             vertex_count: 0,
             depth_view:   None,
             depth_size:   (0, 0),
+            line_pipeline,
+            line_vertex_buf,
+            line_vertex_count: 0,
         }
     }
 
@@ -414,31 +598,47 @@ impl GpuPipeline {
 
     fn update(
         &mut self,
-        device:   &wgpu::Device,
-        queue:    &wgpu::Queue,
-        uniforms: &GpuUniforms,
-        vertices: &[GpuVertex],
+        device:       &wgpu::Device,
+        queue:        &wgpu::Queue,
+        uniforms:     &GpuUniforms,
+        vertices:     &[GpuVertex],
+        line_vertices: &[GpuLineVertex],
     ) {
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(uniforms));
 
+        // ── Point vertices ───────────────────────────────────────────────
         let needed = (vertices.len() * std::mem::size_of::<GpuVertex>()) as u64;
         if needed == 0 {
             self.vertex_count = 0;
-            return;
+        } else {
+            if self.vertex_buf.size() < needed {
+                self.vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label:              Some("point_cloud::vb"),
+                    size:               needed.next_power_of_two(),
+                    usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(vertices));
+            self.vertex_count = vertices.len() as u32;
         }
 
-        // Grow the buffer if required (round up to next power-of-two size).
-        if self.vertex_buf.size() < needed {
-            self.vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label:              Some("point_cloud::vb"),
-                size:               needed.next_power_of_two(),
-                usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+        // ── Line vertices ────────────────────────────────────────────────
+        let line_needed = (line_vertices.len() * std::mem::size_of::<GpuLineVertex>()) as u64;
+        if line_needed == 0 {
+            self.line_vertex_count = 0;
+        } else {
+            if self.line_vertex_buf.size() < line_needed {
+                self.line_vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label:              Some("point_cloud::line_vb"),
+                    size:               line_needed.next_power_of_two(),
+                    usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            queue.write_buffer(&self.line_vertex_buf, 0, bytemuck::cast_slice(line_vertices));
+            self.line_vertex_count = line_vertices.len() as u32;
         }
-
-        queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(vertices));
-        self.vertex_count = vertices.len() as u32;
     }
 
     fn render(
@@ -447,7 +647,7 @@ impl GpuPipeline {
         viewport: Rectangle<u32>,
         encoder:  &mut wgpu::CommandEncoder,
     ) {
-        if self.vertex_count == 0 {
+        if self.vertex_count == 0 && self.line_vertex_count == 0 {
             return;
         }
 
@@ -492,10 +692,22 @@ impl GpuPipeline {
             viewport.width,
             viewport.height,
         );
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
-        pass.draw(0..self.vertex_count, 0..1);
+
+        // Draw lines first (behind points).
+        if self.line_vertex_count > 0 {
+            pass.set_pipeline(&self.line_pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.line_vertex_buf.slice(..));
+            pass.draw(0..self.line_vertex_count, 0..1);
+        }
+
+        // Draw point billboards.
+        if self.vertex_count > 0 {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
+            pass.draw(0..self.vertex_count, 0..1);
+        }
     }
 }
 
@@ -504,8 +716,9 @@ impl GpuPipeline {
 /// The data snapshot sent to the GPU each frame.
 #[derive(Debug, Clone)]
 pub struct PointCloudPrimitive {
-    vertices: Vec<GpuVertex>,
-    camera:   ArcballCamera,
+    vertices:      Vec<GpuVertex>,
+    line_vertices: Vec<GpuLineVertex>,
+    camera:        ArcballCamera,
 }
 
 impl shader::Primitive for PointCloudPrimitive {
@@ -543,7 +756,7 @@ impl shader::Primitive for PointCloudPrimitive {
             _pad: [0.0; 2],
         };
 
-        gpu.update(device, queue, &uniforms, &self.vertices);
+        gpu.update(device, queue, &uniforms, &self.vertices, &self.line_vertices);
     }
 
     fn render(
@@ -695,8 +908,9 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
         });
 
         PointCloudPrimitive {
-            vertices: expand_to_vertices(&sorted),
-            camera:   state.camera.clone(),
+            vertices:      expand_to_vertices(&sorted),
+            line_vertices: expand_lines(&self.cloud.lines),
+            camera:        state.camera.clone(),
         }
     }
 

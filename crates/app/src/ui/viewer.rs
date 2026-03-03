@@ -1,4 +1,4 @@
-use iced::widget::{column, container, row, shader, text, Space};
+use iced::widget::{column, container, row, shader, text, text_input, Space};
 use iced::{alignment, Color, Element, Length};
 
 use embedding_core::EmbeddingSet;
@@ -12,6 +12,7 @@ pub fn view<'a>(
     embeddings: &'a Option<EmbeddingSet>,
     selected: &'a Option<SelectedPointInfo>,
     viewer_camera: &'a ArcballCamera,
+    search_query: &'a str,
 ) -> Element<'a, Message> {
     let has_data = !cloud.points.is_empty();
 
@@ -60,9 +61,12 @@ pub fn view<'a>(
     let axis_panel = build_axis_indicator(viewer_camera);
     let selection_panel = build_selection_info(selected);
     let controls_panel = build_controls_hint();
+    let search_panel = build_search_bar(search_query);
 
     let right_panel = container(
         column![
+            search_panel,
+            Space::with_height(8),
             axis_panel,
             Space::with_height(12),
             selection_panel,
@@ -170,5 +174,19 @@ fn build_controls_hint<'a>() -> Element<'a, Message> {
         text("Dbl-click Reset").size(10),
     ]
     .spacing(1)
+    .into()
+}
+
+// ─── Search bar ──────────────────────────────────────────────────────────────
+
+fn build_search_bar<'a>(query: &'a str) -> Element<'a, Message> {
+    column![
+        text("Search").size(11),
+        text_input("find a word…", query)
+            .on_input(Message::SearchQueryChanged)
+            .size(12)
+            .width(Length::Fill),
+    ]
+    .spacing(3)
     .into()
 }

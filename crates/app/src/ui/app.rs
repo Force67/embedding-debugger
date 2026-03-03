@@ -31,6 +31,10 @@ pub struct App {
     pub selected_point: Option<SelectedPointInfo>,
     /// Mirrored camera state from the viewer (for axis indicator).
     pub viewer_camera: ArcballCamera,
+    /// Current bubble/point render size.
+    pub bubble_size: f32,
+    /// Current search query for fuzzy point finding.
+    pub search_query: String,
 }
 
 /// Information about a selected point (resolved with token label).
@@ -68,6 +72,12 @@ pub enum Message {
     PointSelected(Option<PointSelection>),
     ViewerCameraChanged(ArcballCamera),
 
+    // -- Visualization controls --
+    /// Bubble size slider moved (range 2–30).
+    BubbleSizeChanged(f32),
+    /// Search bar text changed — fuzzy-selects the best matching point.
+    SearchQueryChanged(String),
+
     // -- Misc --
     Noop,
 }
@@ -90,6 +100,8 @@ impl Application for App {
             loading: false,
             selected_point: None,
             viewer_camera: ArcballCamera::default(),
+            bubble_size: 8.0,
+            search_query: String::new(),
         };
         (app, Command::none())
     }
@@ -310,17 +322,47 @@ impl Application for App {
                 Command::none()
             }
 
+            Message::BubbleSizeChanged(size) => {
+                self.bubble_size = size;
+                self.point_cloud.set_point_size(size);
+                Command::none()
+            }
+
+            Message::SearchQueryChanged(query) => {
+                self.search_query = query.clone();
+                if query.trim().is_empty() {
+                    self.selected_point = None;
+                } else if let Some(tokens) = &self.tokens {
+                    if let Some((idx, score)) = fuzzy_find(&query, tokens) {
+                        if score > 0 {
+                            let point = self.point_cloud.points.iter().find(|p| p.index == idx);
+                            if let Some(p) = point {
+                                let pos = p.position;
+                                let label = tokens.tokens[idx].text.clone();
+                                self.selected_point = Some(SelectedPointInfo {
+                                    index: idx,
+                                    label,
+                                    position: pos,
+                                });
+                            }
+                        }
+                    }
+                }
+                Command::none()
+            }
+
             Message::Noop => Command::none(),
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let sidebar = sidebar::view(&self.sidebar, &self.tokens, self.loading);
+        let sidebar = sidebar::view(&self.sidebar, &self.tokens, self.loading, self.bubble_size);
         let viewer = viewer::view(
             &self.point_cloud,
             &self.embeddings,
             &self.selected_point,
             &self.viewer_camera,
+            &self.search_query,
         );
         let status = status_bar::view(&self.status);
 
@@ -383,4 +425,60 @@ impl App {
             })
             .collect()
     }
+}
+
+// ─── Fuzzy search ─────────────────────────────────────────────────────────────
+
+/// Find the best-matching token index for `query`.
+/// Returns `(index, score)` where higher score = better match, or `None`.
+///
+/// Scoring (highest wins):
+///   3 — exact match (case-insensitive)
+///   2 — query is a prefix of the token
+///   1 — token contains the query as a substring
+///   0 — lowest edit-distance fallback (always returns something if tokens exist)
+pub fn fuzzy_find(query: &str, tokens: &embedding_core::TokenCollection) -> Option<(usize, u32)> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let q = query.to_lowercase();
+
+    // Priority passes: exact → prefix → contains
+    for (tier, pred) in [
+        (3u32, Box::new(|t: &str| t.to_lowercase() == q) as Box<dyn Fn(&str) -> bool>),
+        (2,    Box::new(|t: &str| t.to_lowercase().starts_with(&q))),
+        (1,    Box::new(|t: &str| t.to_lowercase().contains(&q))),
+    ] {
+        if let Some(idx) = tokens.tokens.iter().position(|t| pred(&t.text)) {
+            return Some((idx, tier));
+        }
+    }
+
+    // Edit-distance fallback — find token with minimum distance.
+    let best = tokens.tokens
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, t)| edit_distance(&q, &t.text.to_lowercase()));
+
+    best.map(|(idx, _)| (idx, 0))
+}
+
+/// Simple Levenshtein edit distance (bounded to avoid O(n²) blowup on long strings).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().take(32).collect();
+    let b: Vec<char> = b.chars().take(32).collect();
+    let (n, m) = (a.len(), b.len());
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in 0..=n { dp[i][0] = i; }
+    for j in 0..=m { dp[0][j] = j; }
+    for i in 1..=n {
+        for j in 1..=m {
+            dp[i][j] = if a[i - 1] == b[j - 1] {
+                dp[i - 1][j - 1]
+            } else {
+                1 + dp[i - 1][j].min(dp[i][j - 1]).min(dp[i - 1][j - 1])
+            };
+        }
+    }
+    dp[n][m]
 }
