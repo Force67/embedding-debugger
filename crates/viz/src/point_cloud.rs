@@ -52,7 +52,7 @@ impl PointCloud {
             .enumerate()
             .map(|(i, p)| {
                 let color = colors.get(i).copied().unwrap_or(Color::WHITE);
-                PointData::from_projected(p, color, 5.0)
+                PointData::from_projected(p, color, 8.0)
             })
             .collect();
     }
@@ -140,6 +140,8 @@ struct VertOut {
     @builtin(position) clip_pos : vec4<f32>,
     @location(0)       color    : vec4<f32>,
     @location(1)       uv       : vec2<f32>,
+    // Depth fog factor [0.15, 1.0] – interpolated per-fragment.
+    @location(2)       fog      : f32,
 }
 
 @vertex
@@ -148,11 +150,13 @@ fn vs_main(in: VertIn) -> VertOut {
 
     let cc = u.view_proj * vec4<f32>(in.world_pos, 1.0);
 
-    // Convert point_size (radius in px) to clip-space offset.
-    // NDC [-1,1] maps to viewport pixels, so 1px = 2/W or 2/H NDC units.
-    // Multiply by w to convert from NDC to clip coordinates.
-    let rx = in.point_size * 2.0 / u.viewport.x * cc.w;
-    let ry = in.point_size * 2.0 / u.viewport.y * cc.w;
+    // Perspective size attenuation: nearer points appear slightly larger.
+    // cc.w ≈ eye-space depth (grows with distance).
+    let depth_attn = clamp(1.8 / max(0.4, cc.w * 0.5), 0.65, 3.0);
+    let sz = in.point_size * depth_attn;
+
+    let rx = sz * 2.0 / u.viewport.x * cc.w;
+    let ry = sz * 2.0 / u.viewport.y * cc.w;
 
     out.clip_pos = vec4<f32>(
         cc.x + in.quad_offset.x * rx,
@@ -162,18 +166,51 @@ fn vs_main(in: VertIn) -> VertOut {
     );
     out.color = in.color;
     out.uv    = in.quad_offset;
+    // Exponential depth fog – distant points fade into the void.
+    out.fog   = clamp(exp(-cc.w * 0.4), 0.15, 1.0);
     return out;
 }
 
 @fragment
 fn fs_main(in: VertOut) -> @location(0) vec4<f32> {
-    let d = length(in.uv);
+    let d  = length(in.uv);
     if d > 1.0 { discard; }
+    let d2 = d * d;
 
-    // Smooth circular edge + bright specular core.
-    let alpha      = 1.0 - smoothstep(0.55, 1.0, d);
-    let brightness = 1.0 + 0.55 * max(0.0, 1.0 - d * 2.5);
-    return vec4<f32>(in.color.rgb * brightness, in.color.a * alpha);
+    // ── Layer 1: Gaussian hot core (tiny bright center) ───────────────────
+    let core = exp(-d2 * 28.0);
+
+    // ── Layer 2: Solid colored body ───────────────────────────────────────
+    let body = 1.0 - smoothstep(0.0, 0.58, d);
+
+    // ── Layer 3: Soft outer corona – the "drippy" glow halo ──────────────
+    // pow gives a smooth gradient that bleeds outward like liquid light.
+    let halo = pow(max(0.0, 1.0 - d), 2.2) * 0.55;
+
+    // ── Total alpha ───────────────────────────────────────────────────────
+    let alpha = clamp(core + body * 0.88 + halo * 0.4, 0.0, 1.0);
+
+    // ── Color composition ─────────────────────────────────────────────────
+    // Hypersaturate the base color for a vivid liquid-neon look.
+    let gray     = dot(in.color.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let vivid    = clamp(mix(vec3<f32>(gray), in.color.rgb, 1.45), vec3<f32>(0.0), vec3<f32>(1.0));
+
+    let halo_rgb = vivid * 0.5;                   // dim outer bleed
+    let core_rgb = vec3<f32>(1.0, 0.97, 0.88);    // warm white-hot center
+
+    // Blend: halo → vivid body → white-hot core
+    let body_w = clamp(body * 0.88 / max(0.001, alpha), 0.0, 1.0);
+    let core_w = clamp(core          / max(0.001, alpha), 0.0, 1.0);
+    var rgb    = mix(halo_rgb, vivid, body_w);
+    rgb        = mix(rgb, core_rgb, core_w * 0.78);
+
+    // ── Depth fog: distant points dissolve into dark space ────────────────
+    rgb = mix(vec3<f32>(0.03, 0.03, 0.09), rgb, in.fog);
+
+    // ── Premultiplied alpha output ────────────────────────────────────────
+    // With PREMULTIPLIED_ALPHA_BLENDING (src=ONE, dst=ONE_MINUS_SRC_ALPHA),
+    // overlapping halos add their light together – true glow accumulation.
+    return vec4<f32>(rgb * alpha, alpha);
 }
 "#;
 
@@ -281,7 +318,7 @@ impl GpuPipeline {
                     entry_point: "fs_main",
                     targets:     &[Some(wgpu::ColorTargetState {
                         format,
-                        blend:      Some(wgpu::BlendState::ALPHA_BLENDING),
+                        blend:      Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
@@ -429,6 +466,16 @@ impl shader::Primitive for PointCloudPrimitive {
     }
 }
 
+// ─── Depth-sort helper ────────────────────────────────────────────────────────
+
+#[inline]
+fn dist_sq(a: &[f32; 3], b: &[f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    dx * dx + dy * dy + dz * dz
+}
+
 // ─── iced Shader Program ─────────────────────────────────────────────────────
 
 /// iced `Shader` program that drives the point cloud.
@@ -466,8 +513,21 @@ impl shader::Program<()> for PointCloudProgram {
         _cursor: mouse::Cursor,
         _bounds: Rectangle,
     ) -> Self::Primitive {
+        // Sort back-to-front (Painter's Algorithm) so near points alpha-blend
+        // correctly over far ones, giving proper 3-D depth ordering.
+        let eye = state.camera.eye();
+        let eye_pos = [eye.x, eye.y, eye.z];
+
+        let mut sorted = self.cloud.points.clone();
+        sorted.sort_unstable_by(|a, b| {
+            let da = dist_sq(&a.position, &eye_pos);
+            let db = dist_sq(&b.position, &eye_pos);
+            // Reverse order: largest distance first (drawn first = underneath).
+            db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
         PointCloudPrimitive {
-            vertices: expand_to_vertices(&self.cloud.points),
+            vertices: expand_to_vertices(&sorted),
             camera:   state.camera.clone(),
         }
     }
