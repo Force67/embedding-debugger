@@ -109,9 +109,7 @@ impl EmbeddingClient {
             format!("{base}/embeddings")
         } else {
             // Traditional Azure OpenAI — deployment goes in the URL path.
-            format!(
-                "{base}/openai/deployments/{deployment}/embeddings?api-version=2024-02-01"
-            )
+            format!("{base}/openai/deployments/{deployment}/embeddings?api-version=2024-02-01")
         };
 
         let body = EmbedRequest {

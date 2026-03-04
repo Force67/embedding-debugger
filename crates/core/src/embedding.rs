@@ -76,6 +76,9 @@ impl EmbeddingSet {
 
     /// Get only the vectors as a flat matrix (rows = points, cols = dims).
     pub fn vectors_as_matrix(&self) -> Vec<&[f32]> {
-        self.embeddings.iter().map(|e| e.vector.as_slice()).collect()
+        self.embeddings
+            .iter()
+            .map(|e| e.vector.as_slice())
+            .collect()
     }
 }

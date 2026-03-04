@@ -66,13 +66,11 @@ impl Projector {
         // Center the data (parallel row-wise subtraction).
         let mean: DVector<f32> = data.row_mean().transpose();
         let mut centered_flat = flat;
-        centered_flat
-            .par_chunks_mut(d)
-            .for_each(|row| {
-                for j in 0..d {
-                    row[j] -= mean[j];
-                }
-            });
+        centered_flat.par_chunks_mut(d).for_each(|row| {
+            for j in 0..d {
+                row[j] -= mean[j];
+            }
+        });
         let centered = DMatrix::from_row_slice(n, d, &centered_flat);
 
         // Covariance matrix (d x d).  For efficiency with large d we use the
@@ -158,84 +156,95 @@ impl Projector {
             return Vec::new();
         }
         if n == 1 {
-            return vec![ProjectedPoint { x: 0.0, y: 0.0, z: 0.0, index: 0 }];
+            return vec![ProjectedPoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                index: 0,
+            }];
         }
 
         // ── Step 1: Pairwise squared Euclidean distances (parallel) ──────────
         let mut dist2 = vec![0.0f32; n * n];
         // Each row i is independent — compute in parallel.
-        dist2
-            .par_chunks_mut(n)
-            .enumerate()
-            .for_each(|(i, row)| {
-                for j in 0..n {
-                    if j != i {
-                        let sq: f32 = vectors[i]
-                            .iter()
-                            .zip(vectors[j].iter())
-                            .map(|(a, b)| (a - b) * (a - b))
-                            .sum();
-                        row[j] = sq;
-                    }
+        dist2.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+            for j in 0..n {
+                if j != i {
+                    let sq: f32 = vectors[i]
+                        .iter()
+                        .zip(vectors[j].iter())
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum();
+                    row[j] = sq;
                 }
-            });
+            }
+        });
 
         // ── Step 2: High-dim conditional probabilities (parallel per row) ─────
         let perp = params.perplexity.min((n - 1) as f32 * 0.5).max(2.0);
         let target_entropy = perp.ln();
 
         let mut p_cond = vec![0.0f32; n * n];
-        p_cond
-            .par_chunks_mut(n)
-            .enumerate()
-            .for_each(|(i, p_row)| {
-                let dist_row = &dist2[i * n..(i + 1) * n];
-                let mut beta_lo = f32::NEG_INFINITY;
-                let mut beta_hi = f32::INFINITY;
-                let mut beta = 1.0_f32;
-                let mut row = vec![0.0f32; n];
+        p_cond.par_chunks_mut(n).enumerate().for_each(|(i, p_row)| {
+            let dist_row = &dist2[i * n..(i + 1) * n];
+            let mut beta_lo = f32::NEG_INFINITY;
+            let mut beta_hi = f32::INFINITY;
+            let mut beta = 1.0_f32;
+            let mut row = vec![0.0f32; n];
 
-                for _ in 0..50 {
-                    let mut z = 0.0_f32;
-                    for j in 0..n {
-                        if j != i {
-                            row[j] = (-beta * dist_row[j]).exp();
-                            z += row[j];
-                        }
-                    }
-                    if z < f32::EPSILON { z = f32::EPSILON; }
-
-                    let mut h = z.ln();
-                    for j in 0..n {
-                        if j != i {
-                            h += beta * dist_row[j] * row[j] / z;
-                        }
-                    }
-                    for j in 0..n { row[j] /= z; }
-
-                    let diff = h - target_entropy;
-                    if diff.abs() < 1e-5 { break; }
-                    if diff > 0.0 {
-                        beta_lo = beta;
-                        beta = if beta_hi.is_infinite() { beta * 2.0 } else { (beta + beta_hi) / 2.0 };
-                    } else {
-                        beta_hi = beta;
-                        beta = if beta_lo.is_infinite() { beta / 2.0 } else { (beta + beta_lo) / 2.0 };
+            for _ in 0..50 {
+                let mut z = 0.0_f32;
+                for j in 0..n {
+                    if j != i {
+                        row[j] = (-beta * dist_row[j]).exp();
+                        z += row[j];
                     }
                 }
-                p_row.copy_from_slice(&row);
-            });
+                if z < f32::EPSILON {
+                    z = f32::EPSILON;
+                }
+
+                let mut h = z.ln();
+                for j in 0..n {
+                    if j != i {
+                        h += beta * dist_row[j] * row[j] / z;
+                    }
+                }
+                for j in 0..n {
+                    row[j] /= z;
+                }
+
+                let diff = h - target_entropy;
+                if diff.abs() < 1e-5 {
+                    break;
+                }
+                if diff > 0.0 {
+                    beta_lo = beta;
+                    beta = if beta_hi.is_infinite() {
+                        beta * 2.0
+                    } else {
+                        (beta + beta_hi) / 2.0
+                    };
+                } else {
+                    beta_hi = beta;
+                    beta = if beta_lo.is_infinite() {
+                        beta / 2.0
+                    } else {
+                        (beta + beta_lo) / 2.0
+                    };
+                }
+            }
+            p_row.copy_from_slice(&row);
+        });
 
         // ── Step 3: Symmetrise P_ij = (P(j|i) + P(i|j)) / 2n ───────────────
         let mut p = vec![0.0f32; n * n];
-        p.par_chunks_mut(n)
-            .enumerate()
-            .for_each(|(i, row)| {
-                for j in 0..n {
-                    let v = (p_cond[i * n + j] + p_cond[j * n + i]) / (2.0 * n as f32);
-                    row[j] = v.max(1e-12);
-                }
-            });
+        p.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+            for j in 0..n {
+                let v = (p_cond[i * n + j] + p_cond[j * n + i]) / (2.0 * n as f32);
+                row[j] = v.max(1e-12);
+            }
+        });
 
         // ── Step 4: Initialise Y from PCA (scaled small for stability) ───────
         let pca_pts = Self::pca(vectors);
@@ -255,21 +264,18 @@ impl Projector {
             let momentum: f32 = if iter < 250 { 0.5 } else { 0.8 };
 
             // Low-dim affinities Q — each row computed independently (no cross-row reads).
-            q_num
-                .par_chunks_mut(n)
-                .enumerate()
-                .for_each(|(i, row)| {
-                    for j in 0..n {
-                        if j != i {
-                            let dx = y[i][0] - y[j][0];
-                            let dy = y[i][1] - y[j][1];
-                            let dz = y[i][2] - y[j][2];
-                            row[j] = 1.0 / (1.0 + dx * dx + dy * dy + dz * dz);
-                        } else {
-                            row[j] = 0.0;
-                        }
+            q_num.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+                for j in 0..n {
+                    if j != i {
+                        let dx = y[i][0] - y[j][0];
+                        let dy = y[i][1] - y[j][1];
+                        let dz = y[i][2] - y[j][2];
+                        row[j] = 1.0 / (1.0 + dx * dx + dy * dy + dz * dz);
+                    } else {
+                        row[j] = 0.0;
                     }
-                });
+                }
+            });
             // sum of all non-diagonal entries = 2 * Σ_{i<j} q_{ij}, same as original.
             let sum_q = q_num.par_iter().sum::<f32>().max(f32::EPSILON);
 
@@ -297,8 +303,13 @@ impl Projector {
             for i in 0..n {
                 for k in 0..3 {
                     let same_sign = (grad[i][k] > 0.0) == (vel[i][k] > 0.0);
-                    gains[i][k] = if same_sign { (gains[i][k] * 0.8).max(0.01) } else { gains[i][k] + 0.2 };
-                    vel[i][k] = momentum * vel[i][k] - params.learning_rate * gains[i][k] * grad[i][k];
+                    gains[i][k] = if same_sign {
+                        (gains[i][k] * 0.8).max(0.01)
+                    } else {
+                        gains[i][k] + 0.2
+                    };
+                    vel[i][k] =
+                        momentum * vel[i][k] - params.learning_rate * gains[i][k] * grad[i][k];
                     y[i][k] += vel[i][k];
                 }
             }
@@ -306,13 +317,20 @@ impl Projector {
             // Re-centre Y.
             for k in 0..3 {
                 let mean = y.iter().map(|pt| pt[k]).sum::<f32>() / n as f32;
-                for pt in y.iter_mut() { pt[k] -= mean; }
+                for pt in y.iter_mut() {
+                    pt[k] -= mean;
+                }
             }
         }
 
         y.into_iter()
             .enumerate()
-            .map(|(i, pt)| ProjectedPoint { x: pt[0], y: pt[1], z: pt[2], index: i })
+            .map(|(i, pt)| ProjectedPoint {
+                x: pt[0],
+                y: pt[1],
+                z: pt[2],
+                index: i,
+            })
             .collect()
     }
 

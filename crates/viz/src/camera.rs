@@ -45,11 +45,7 @@ impl ArcballCamera {
         let x = self.distance * self.pitch.cos() * self.yaw.sin();
         let y = self.distance * self.pitch.sin();
         let z = self.distance * self.pitch.cos() * self.yaw.cos();
-        Point3::new(
-            self.target.x + x,
-            self.target.y + y,
-            self.target.z + z,
-        )
+        Point3::new(self.target.x + x, self.target.y + y, self.target.z + z)
     }
 
     /// Camera-local right vector (world space).

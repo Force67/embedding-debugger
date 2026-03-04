@@ -3,7 +3,7 @@ use embedding_core::projection::ProjectedPoint;
 use iced::event::Status;
 use iced::widget::shader;
 use iced::widget::shader::wgpu;
-use iced::{Color, Point, Rectangle, Size, mouse, keyboard};
+use iced::{keyboard, mouse, Color, Point, Rectangle, Size};
 use iced_core::window;
 use nalgebra::Vector4;
 
@@ -55,7 +55,11 @@ pub struct PointCloud {
 
 impl PointCloud {
     pub fn new(points: Vec<PointData>, camera: ArcballCamera) -> Self {
-        Self { points, lines: Vec::new(), camera }
+        Self {
+            points,
+            lines: Vec::new(),
+            camera,
+        }
     }
 
     /// Update points from projected embeddings.
@@ -135,12 +139,12 @@ pub struct PointSelection {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 struct GpuVertex {
-    world_pos:   [f32; 3],
-    _pad0:       f32,
-    color:       [f32; 4],
-    point_size:  f32,
+    world_pos: [f32; 3],
+    _pad0: f32,
+    color: [f32; 4],
+    point_size: f32,
     quad_offset: [f32; 2],
-    _pad1:       f32,
+    _pad1: f32,
 }
 
 /// Uniform block uploaded each frame (80 bytes, std140-compatible).
@@ -148,8 +152,8 @@ struct GpuVertex {
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct GpuUniforms {
     view_proj: [f32; 16], // 64 bytes
-    viewport:  [f32; 2],  //  8 bytes – physical pixel dimensions of the widget
-    _pad:      [f32; 2],  //  8 bytes padding → total 80, multiple of 16 ✓
+    viewport: [f32; 2],   //  8 bytes – physical pixel dimensions of the widget
+    _pad: [f32; 2],       //  8 bytes padding → total 80, multiple of 16 ✓
 }
 
 // ─── Billboard quad expansion ─────────────────────────────────────────────────
@@ -157,11 +161,11 @@ struct GpuUniforms {
 /// Corner offsets for the two triangles that form a billboard quad.
 const QUAD_CORNERS: [[f32; 2]; 6] = [
     [-1.0, -1.0],
-    [ 1.0, -1.0],
-    [ 1.0,  1.0],
+    [1.0, -1.0],
+    [1.0, 1.0],
     [-1.0, -1.0],
-    [ 1.0,  1.0],
-    [-1.0,  1.0],
+    [1.0, 1.0],
+    [-1.0, 1.0],
 ];
 
 fn expand_to_vertices(points: &[PointData]) -> Vec<GpuVertex> {
@@ -169,12 +173,12 @@ fn expand_to_vertices(points: &[PointData]) -> Vec<GpuVertex> {
     for p in points {
         for &qo in &QUAD_CORNERS {
             verts.push(GpuVertex {
-                world_pos:   p.position,
-                _pad0:       0.0,
-                color:       p.color,
-                point_size:  p.size,
+                world_pos: p.position,
+                _pad0: 0.0,
+                color: p.color,
+                point_size: p.size,
                 quad_offset: qo,
-                _pad1:       0.0,
+                _pad1: 0.0,
             });
         }
     }
@@ -193,8 +197,8 @@ fn expand_to_vertices(points: &[PointData]) -> Vec<GpuVertex> {
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 struct GpuLineVertex {
     world_pos: [f32; 3],
-    _pad0:     f32,
-    color:     [f32; 4],
+    _pad0: f32,
+    color: [f32; 4],
 }
 
 fn expand_lines(lines: &[LineData]) -> Vec<GpuLineVertex> {
@@ -202,13 +206,13 @@ fn expand_lines(lines: &[LineData]) -> Vec<GpuLineVertex> {
     for l in lines {
         verts.push(GpuLineVertex {
             world_pos: l.start,
-            _pad0:     0.0,
-            color:     l.color,
+            _pad0: 0.0,
+            color: l.color,
         });
         verts.push(GpuLineVertex {
             world_pos: l.end,
-            _pad0:     0.0,
-            color:     l.color,
+            _pad0: 0.0,
+            color: l.color,
         });
     }
     verts
@@ -370,17 +374,17 @@ fn fs_line(in: LineVertOut) -> @location(0) vec4<f32> {
 // ─── wgpu render pipeline wrapper ────────────────────────────────────────────
 
 struct GpuPipeline {
-    pipeline:       wgpu::RenderPipeline,
-    uniform_buf:    wgpu::Buffer,
-    vertex_buf:     wgpu::Buffer,
-    bind_group:     wgpu::BindGroup,
-    vertex_count:   u32,
+    pipeline: wgpu::RenderPipeline,
+    uniform_buf: wgpu::Buffer,
+    vertex_buf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    vertex_count: u32,
     // Depth buffer for proper occlusion.
-    depth_view:     Option<wgpu::TextureView>,
-    depth_size:     (u32, u32),
+    depth_view: Option<wgpu::TextureView>,
+    depth_size: (u32, u32),
     // Line rendering resources.
-    line_pipeline:    wgpu::RenderPipeline,
-    line_vertex_buf:  wgpu::Buffer,
+    line_pipeline: wgpu::RenderPipeline,
+    line_vertex_buf: wgpu::Buffer,
     line_vertex_count: u32,
 }
 
@@ -389,178 +393,175 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 impl GpuPipeline {
     fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("point_cloud::shader"),
+            label: Some("point_cloud::shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label:              Some("point_cloud::uniforms"),
-            size:               std::mem::size_of::<GpuUniforms>() as u64,
-            usage:              wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            label: Some("point_cloud::uniforms"),
+            size: std::mem::size_of::<GpuUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label:   Some("point_cloud::bgl"),
+            label: Some("point_cloud::bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
-                binding:    0,
+                binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty:         wgpu::BindingType::Buffer {
-                    ty:                 wgpu::BufferBindingType::Uniform,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size:   None,
+                    min_binding_size: None,
                 },
                 count: None,
             }],
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label:   Some("point_cloud::bg"),
-            layout:  &bgl,
+            label: Some("point_cloud::bg"),
+            layout: &bgl,
             entries: &[wgpu::BindGroupEntry {
-                binding:  0,
+                binding: 0,
                 resource: uniform_buf.as_entire_binding(),
             }],
         });
 
         // Start with a small placeholder; will grow as needed.
         let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label:              Some("point_cloud::vb"),
-            size:               std::mem::size_of::<GpuVertex>() as u64 * 6,
-            usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            label: Some("point_cloud::vb"),
+            size: std::mem::size_of::<GpuVertex>() as u64 * 6,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label:                Some("point_cloud::pl"),
-                bind_group_layouts:   &[&bgl],
-                push_constant_ranges: &[],
-            });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("point_cloud::pl"),
+            bind_group_layouts: &[&bgl],
+            push_constant_ranges: &[],
+        });
 
         // Vertex attribute descriptors with explicit byte offsets.
         let vert_attrs = [
             wgpu::VertexAttribute {
-                format:           wgpu::VertexFormat::Float32x3,
-                offset:           0,
-                shader_location:  0,
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
             },
             wgpu::VertexAttribute {
-                format:           wgpu::VertexFormat::Float32x4,
-                offset:           16,
-                shader_location:  1,
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 1,
             },
             wgpu::VertexAttribute {
-                format:           wgpu::VertexFormat::Float32,
-                offset:           32,
-                shader_location:  2,
+                format: wgpu::VertexFormat::Float32,
+                offset: 32,
+                shader_location: 2,
             },
             wgpu::VertexAttribute {
-                format:           wgpu::VertexFormat::Float32x2,
-                offset:           36,
-                shader_location:  3,
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 36,
+                shader_location: 3,
             },
         ];
 
-        let pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label:  Some("point_cloud::rp"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module:      &shader,
-                    entry_point: "vs_main",
-                    buffers:     &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
-                        step_mode:    wgpu::VertexStepMode::Vertex,
-                        attributes:   &vert_attrs,
-                    }],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module:      &shader,
-                    entry_point: "fs_main",
-                    targets:     &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend:      Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology:  wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format:              DEPTH_FORMAT,
-                    depth_write_enabled: true,
-                    depth_compare:       wgpu::CompareFunction::LessEqual,
-                    stencil:             wgpu::StencilState::default(),
-                    bias:                wgpu::DepthBiasState::default(),
-                }),
-                multisample:   wgpu::MultisampleState::default(),
-                multiview:     None,
-            });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("point_cloud::rp"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &vert_attrs,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
 
         // ── Line pipeline ────────────────────────────────────────────────
         let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("point_cloud::line_shader"),
+            label: Some("point_cloud::line_shader"),
             source: wgpu::ShaderSource::Wgsl(LINE_SHADER_SRC.into()),
         });
 
         let line_vert_attrs = [
             wgpu::VertexAttribute {
-                format:          wgpu::VertexFormat::Float32x3,
-                offset:          0,
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
                 shader_location: 0,
             },
             wgpu::VertexAttribute {
-                format:          wgpu::VertexFormat::Float32x4,
-                offset:          16,
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
                 shader_location: 1,
             },
         ];
 
-        let line_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label:  Some("point_cloud::line_rp"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module:      &line_shader,
-                    entry_point: "vs_line",
-                    buffers:     &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<GpuLineVertex>() as u64,
-                        step_mode:    wgpu::VertexStepMode::Vertex,
-                        attributes:   &line_vert_attrs,
-                    }],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module:      &line_shader,
-                    entry_point: "fs_line",
-                    targets:     &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend:      Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology:  wgpu::PrimitiveTopology::LineList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format:              DEPTH_FORMAT,
-                    depth_write_enabled: true,
-                    depth_compare:       wgpu::CompareFunction::LessEqual,
-                    stencil:             wgpu::StencilState::default(),
-                    bias:                wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview:   None,
-            });
+        let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("point_cloud::line_rp"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &line_shader,
+                entry_point: "vs_line",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuLineVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &line_vert_attrs,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &line_shader,
+                entry_point: "fs_line",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
 
         let line_vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label:              Some("point_cloud::line_vb"),
-            size:               std::mem::size_of::<GpuLineVertex>() as u64 * 2,
-            usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            label: Some("point_cloud::line_vb"),
+            size: std::mem::size_of::<GpuLineVertex>() as u64 * 2,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -570,8 +571,8 @@ impl GpuPipeline {
             vertex_buf,
             bind_group,
             vertex_count: 0,
-            depth_view:   None,
-            depth_size:   (0, 0),
+            depth_view: None,
+            depth_size: (0, 0),
             line_pipeline,
             line_vertex_buf,
             line_vertex_count: 0,
@@ -587,14 +588,18 @@ impl GpuPipeline {
             return;
         }
         let tex = device.create_texture(&wgpu::TextureDescriptor {
-            label:           Some("point_cloud::depth_tex"),
-            size:            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            label: Some("point_cloud::depth_tex"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
-            sample_count:    1,
-            dimension:       wgpu::TextureDimension::D2,
-            format:          DEPTH_FORMAT,
-            usage:           wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats:    &[],
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
         });
         self.depth_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
         self.depth_size = (width, height);
@@ -602,10 +607,10 @@ impl GpuPipeline {
 
     fn update(
         &mut self,
-        device:       &wgpu::Device,
-        queue:        &wgpu::Queue,
-        uniforms:     &GpuUniforms,
-        vertices:     &[GpuVertex],
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uniforms: &GpuUniforms,
+        vertices: &[GpuVertex],
         line_vertices: &[GpuLineVertex],
     ) {
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(uniforms));
@@ -617,9 +622,9 @@ impl GpuPipeline {
         } else {
             if self.vertex_buf.size() < needed {
                 self.vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label:              Some("point_cloud::vb"),
-                    size:               needed.next_power_of_two(),
-                    usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    label: Some("point_cloud::vb"),
+                    size: needed.next_power_of_two(),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
             }
@@ -634,22 +639,26 @@ impl GpuPipeline {
         } else {
             if self.line_vertex_buf.size() < line_needed {
                 self.line_vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label:              Some("point_cloud::line_vb"),
-                    size:               line_needed.next_power_of_two(),
-                    usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    label: Some("point_cloud::line_vb"),
+                    size: line_needed.next_power_of_two(),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
             }
-            queue.write_buffer(&self.line_vertex_buf, 0, bytemuck::cast_slice(line_vertices));
+            queue.write_buffer(
+                &self.line_vertex_buf,
+                0,
+                bytemuck::cast_slice(line_vertices),
+            );
             self.line_vertex_count = line_vertices.len() as u32;
         }
     }
 
     fn render(
         &self,
-        target:   &wgpu::TextureView,
+        target: &wgpu::TextureView,
         viewport: Rectangle<u32>,
-        encoder:  &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
     ) {
         if self.vertex_count == 0 && self.line_vertex_count == 0 {
             return;
@@ -661,25 +670,25 @@ impl GpuPipeline {
         };
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label:                    Some("point_cloud::pass"),
-            color_attachments:        &[Some(wgpu::RenderPassColorAttachment {
-                view:           target,
+            label: Some("point_cloud::pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
                 resolve_target: None,
-                ops:            wgpu::Operations {
-                    load:  wgpu::LoadOp::Load,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view:       depth_view,
-                depth_ops:  Some(wgpu::Operations {
-                    load:  wgpu::LoadOp::Clear(1.0),
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes:         None,
-            occlusion_query_set:      None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
         });
 
         pass.set_viewport(
@@ -690,12 +699,7 @@ impl GpuPipeline {
             0.0,
             1.0,
         );
-        pass.set_scissor_rect(
-            viewport.x,
-            viewport.y,
-            viewport.width,
-            viewport.height,
-        );
+        pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
 
         // Draw lines first (behind points).
         if self.line_vertex_count > 0 {
@@ -720,21 +724,21 @@ impl GpuPipeline {
 /// The data snapshot sent to the GPU each frame.
 #[derive(Debug, Clone)]
 pub struct PointCloudPrimitive {
-    vertices:      Vec<GpuVertex>,
+    vertices: Vec<GpuVertex>,
     line_vertices: Vec<GpuLineVertex>,
-    camera:        ArcballCamera,
+    camera: ArcballCamera,
 }
 
 impl shader::Primitive for PointCloudPrimitive {
     fn prepare(
         &self,
-        format:       wgpu::TextureFormat,
-        device:       &wgpu::Device,
-        queue:        &wgpu::Queue,
-        bounds:       Rectangle,
-        target_size:  Size<u32>,
+        format: wgpu::TextureFormat,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bounds: Rectangle,
+        target_size: Size<u32>,
         scale_factor: f32,
-        storage:      &mut shader::Storage,
+        storage: &mut shader::Storage,
     ) {
         if !storage.has::<GpuPipeline>() {
             storage.store(GpuPipeline::new(device, format));
@@ -745,31 +749,38 @@ impl shader::Primitive for PointCloudPrimitive {
         gpu.ensure_depth_texture(device, target_size.width, target_size.height);
 
         // Re-derive projection with the correct aspect ratio for this frame.
-        let mut cam   = self.camera.clone();
-        cam.aspect    = if bounds.height > 0.0 { bounds.width / bounds.height } else { 1.0 };
-        let vp        = cam.view_projection();
+        let mut cam = self.camera.clone();
+        cam.aspect = if bounds.height > 0.0 {
+            bounds.width / bounds.height
+        } else {
+            1.0
+        };
+        let vp = cam.view_projection();
         let mut vp_arr = [0.0f32; 16];
         vp_arr.copy_from_slice(vp.as_slice());
 
         let uniforms = GpuUniforms {
             view_proj: vp_arr,
-            viewport:  [
-                bounds.width  * scale_factor,
-                bounds.height * scale_factor,
-            ],
+            viewport: [bounds.width * scale_factor, bounds.height * scale_factor],
             _pad: [0.0; 2],
         };
 
-        gpu.update(device, queue, &uniforms, &self.vertices, &self.line_vertices);
+        gpu.update(
+            device,
+            queue,
+            &uniforms,
+            &self.vertices,
+            &self.line_vertices,
+        );
     }
 
     fn render(
         &self,
-        storage:      &shader::Storage,
-        target:       &wgpu::TextureView,
+        storage: &shader::Storage,
+        target: &wgpu::TextureView,
         _target_size: Size<u32>,
-        viewport:     Rectangle<u32>,
-        encoder:      &mut wgpu::CommandEncoder,
+        viewport: Rectangle<u32>,
+        encoder: &mut wgpu::CommandEncoder,
     ) {
         if let Some(gpu) = storage.get::<GpuPipeline>() {
             gpu.render(target, viewport, encoder);
@@ -798,11 +809,15 @@ const DRAG_THRESHOLD: f32 = 4.0;
 fn pick_point(
     camera: &ArcballCamera,
     points: &[PointData],
-    click:  Point,
+    click: Point,
     bounds: Rectangle,
 ) -> Option<usize> {
     let mut cam = camera.clone();
-    cam.aspect = if bounds.height > 0.0 { bounds.width / bounds.height } else { 1.0 };
+    cam.aspect = if bounds.height > 0.0 {
+        bounds.width / bounds.height
+    } else {
+        1.0
+    };
     let vp = cam.view_projection();
 
     let threshold_sq = PICK_THRESHOLD * PICK_THRESHOLD;
@@ -811,12 +826,14 @@ fn pick_point(
 
     for (i, p) in points.iter().enumerate() {
         let clip = vp * Vector4::new(p.position[0], p.position[1], p.position[2], 1.0);
-        if clip.w <= 0.001 { continue; }
+        if clip.w <= 0.001 {
+            continue;
+        }
 
         let ndc_x = clip.x / clip.w;
         let ndc_y = clip.y / clip.w;
 
-        let sx = (ndc_x + 1.0) * 0.5 * bounds.width  + bounds.x;
+        let sx = (ndc_x + 1.0) * 0.5 * bounds.width + bounds.x;
         let sy = (1.0 - ndc_y) * 0.5 * bounds.height + bounds.y;
 
         let dx = sx - click.x;
@@ -848,7 +865,7 @@ pub struct PointCloudProgram {
 #[derive(Debug, Clone)]
 pub struct InteractionState {
     pub camera: ArcballCamera,
-    drag:       Option<DragState>,
+    drag: Option<DragState>,
     /// Timestamp of last click for double-click detection.
     last_click: Option<Instant>,
     /// Currently selected point (by embedding index).
@@ -858,39 +875,62 @@ pub struct InteractionState {
 impl Default for InteractionState {
     fn default() -> Self {
         Self {
-            camera:     ArcballCamera::default(),
-            drag:       None,
+            camera: ArcballCamera::default(),
+            drag: None,
             last_click: None,
-            selected:   None,
+            selected: None,
         }
     }
 }
 
 /// Double-click threshold in milliseconds.
 const DOUBLE_CLICK_MS: u128 = 350;
+/// Max number of points rendered while camera is actively dragging.
+const DRAG_POINT_CAP: usize = 12_000;
 
 #[derive(Debug, Clone)]
 struct DragState {
-    button:    mouse::Button,
+    button: mouse::Button,
     start_pos: Point,
-    last_pos:  Point,
+    last_pos: Point,
     has_moved: bool,
 }
 
 impl shader::Program<ViewerEvent> for PointCloudProgram {
-    type State     = InteractionState;
+    type State = InteractionState;
     type Primitive = PointCloudPrimitive;
 
     fn draw(
         &self,
-        state:   &Self::State,
+        state: &Self::State,
         _cursor: mouse::Cursor,
         _bounds: Rectangle,
     ) -> Self::Primitive {
         let eye = state.camera.eye();
         let eye_pos = [eye.x, eye.y, eye.z];
+        let interacting = state.drag.as_ref().map(|d| d.has_moved).unwrap_or(false);
+        let mut sorted = if interacting && self.cloud.points.len() > DRAG_POINT_CAP {
+            let stride = (self.cloud.points.len() + DRAG_POINT_CAP - 1) / DRAG_POINT_CAP;
+            let mut sampled: Vec<PointData> = self
+                .cloud
+                .points
+                .iter()
+                .step_by(stride.max(1))
+                .copied()
+                .collect();
 
-        let mut sorted = self.cloud.points.clone();
+            // Keep the selected point visible even when down-sampling.
+            if let Some(sel_idx) = state.selected {
+                if !sampled.iter().any(|p| p.index == sel_idx) {
+                    if let Some(sel) = self.cloud.points.iter().find(|p| p.index == sel_idx) {
+                        sampled.push(*sel);
+                    }
+                }
+            }
+            sampled
+        } else {
+            self.cloud.points.clone()
+        };
 
         // Highlight the selected point (bigger + brighter).
         if let Some(sel_idx) = state.selected {
@@ -912,19 +952,19 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
         });
 
         PointCloudPrimitive {
-            vertices:      expand_to_vertices(&sorted),
+            vertices: expand_to_vertices(&sorted),
             line_vertices: expand_lines(&self.cloud.lines),
-            camera:        state.camera.clone(),
+            camera: state.camera.clone(),
         }
     }
 
     fn update(
         &self,
-        state:  &mut Self::State,
-        event:  shader::Event,
+        state: &mut Self::State,
+        event: shader::Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-        shell:  &mut iced_core::Shell<'_, ViewerEvent>,
+        shell: &mut iced_core::Shell<'_, ViewerEvent>,
     ) -> (Status, Option<ViewerEvent>) {
         match event {
             // ── Mouse events ──────────────────────────────────────────────
@@ -940,16 +980,19 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
                                         state.camera.reset();
                                         state.last_click = None;
                                         shell.request_redraw(window::RedrawRequest::NextFrame);
-                                        return (Status::Captured, Some(ViewerEvent::CameraChanged(state.camera.clone())));
+                                        return (
+                                            Status::Captured,
+                                            Some(ViewerEvent::CameraChanged(state.camera.clone())),
+                                        );
                                     }
                                 }
                                 state.last_click = Some(now);
                             }
 
                             state.drag = Some(DragState {
-                                button:    btn,
+                                button: btn,
                                 start_pos: abs,
-                                last_pos:  abs,
+                                last_pos: abs,
                                 has_moved: false,
                             });
                             shell.request_redraw(window::RedrawRequest::NextFrame);
@@ -972,22 +1015,29 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
                                 let point = &self.cloud.points[vec_idx];
                                 state.selected = Some(point.index);
                                 shell.request_redraw(window::RedrawRequest::NextFrame);
-                                return (Status::Captured, Some(ViewerEvent::PointSelected(
-                                    Some(PointSelection {
-                                        index:    point.index,
+                                return (
+                                    Status::Captured,
+                                    Some(ViewerEvent::PointSelected(Some(PointSelection {
+                                        index: point.index,
                                         position: point.position,
-                                    })
-                                )));
+                                    }))),
+                                );
                             } else {
                                 // Clicked empty space → deselect.
                                 if state.selected.is_some() {
                                     state.selected = None;
                                     shell.request_redraw(window::RedrawRequest::NextFrame);
-                                    return (Status::Captured, Some(ViewerEvent::PointSelected(None)));
+                                    return (
+                                        Status::Captured,
+                                        Some(ViewerEvent::PointSelected(None)),
+                                    );
                                 }
                             }
                         } else if drag.has_moved {
-                            return (Status::Captured, Some(ViewerEvent::CameraChanged(state.camera.clone())));
+                            return (
+                                Status::Captured,
+                                Some(ViewerEvent::CameraChanged(state.camera.clone())),
+                            );
                         }
                         return (Status::Captured, None);
                     }
@@ -1002,7 +1052,9 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
 
                         let total_dx = position.x - drag.start_pos.x;
                         let total_dy = position.y - drag.start_pos.y;
-                        if total_dx * total_dx + total_dy * total_dy > DRAG_THRESHOLD * DRAG_THRESHOLD {
+                        if total_dx * total_dx + total_dy * total_dy
+                            > DRAG_THRESHOLD * DRAG_THRESHOLD
+                        {
                             drag.has_moved = true;
                         }
 
@@ -1018,7 +1070,10 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
                                 _ => {}
                             }
                             shell.request_redraw(window::RedrawRequest::NextFrame);
-                            return (Status::Captured, Some(ViewerEvent::CameraChanged(state.camera.clone())));
+                            return (
+                                Status::Captured,
+                                Some(ViewerEvent::CameraChanged(state.camera.clone())),
+                            );
                         }
 
                         shell.request_redraw(window::RedrawRequest::NextFrame);
@@ -1030,12 +1085,15 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
                 mouse::Event::WheelScrolled { delta } => {
                     if cursor.is_over(bounds) {
                         let scroll = match delta {
-                            mouse::ScrollDelta::Lines  { y, .. } => y,
+                            mouse::ScrollDelta::Lines { y, .. } => y,
                             mouse::ScrollDelta::Pixels { y, .. } => y * 0.02,
                         };
                         state.camera.zoom(scroll * 2.5);
                         shell.request_redraw(window::RedrawRequest::NextFrame);
-                        return (Status::Captured, Some(ViewerEvent::CameraChanged(state.camera.clone())));
+                        return (
+                            Status::Captured,
+                            Some(ViewerEvent::CameraChanged(state.camera.clone())),
+                        );
                     }
                     (Status::Ignored, None)
                 }
@@ -1055,13 +1113,34 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
 
                     let handled = match &key {
                         keyboard::Key::Character(c) => match c.as_str() {
-                            "w" => { state.camera.pan(0.0, pan_step); true }
-                            "s" => { state.camera.pan(0.0, -pan_step); true }
-                            "a" => { state.camera.pan(-pan_step, 0.0); true }
-                            "d" => { state.camera.pan(pan_step, 0.0); true }
-                            "q" => { state.camera.zoom(3.0); true }
-                            "e" => { state.camera.zoom(-3.0); true }
-                            "r" => { state.camera.reset(); true }
+                            "w" => {
+                                state.camera.pan(0.0, pan_step);
+                                true
+                            }
+                            "s" => {
+                                state.camera.pan(0.0, -pan_step);
+                                true
+                            }
+                            "a" => {
+                                state.camera.pan(-pan_step, 0.0);
+                                true
+                            }
+                            "d" => {
+                                state.camera.pan(pan_step, 0.0);
+                                true
+                            }
+                            "q" => {
+                                state.camera.zoom(3.0);
+                                true
+                            }
+                            "e" => {
+                                state.camera.zoom(-3.0);
+                                true
+                            }
+                            "r" => {
+                                state.camera.reset();
+                                true
+                            }
                             "f" => {
                                 // Focus: reset target to origin, keep orientation.
                                 state.camera.target = nalgebra::Point3::origin();
@@ -1072,15 +1151,30 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
                         keyboard::Key::Named(named) => {
                             use keyboard::key::Named as N;
                             match named {
-                                N::ArrowUp    => { state.camera.rotate(0.0, -rot_step); true }
-                                N::ArrowDown  => { state.camera.rotate(0.0,  rot_step); true }
-                                N::ArrowLeft  => { state.camera.rotate(-rot_step, 0.0); true }
-                                N::ArrowRight => { state.camera.rotate( rot_step, 0.0); true }
+                                N::ArrowUp => {
+                                    state.camera.rotate(0.0, -rot_step);
+                                    true
+                                }
+                                N::ArrowDown => {
+                                    state.camera.rotate(0.0, rot_step);
+                                    true
+                                }
+                                N::ArrowLeft => {
+                                    state.camera.rotate(-rot_step, 0.0);
+                                    true
+                                }
+                                N::ArrowRight => {
+                                    state.camera.rotate(rot_step, 0.0);
+                                    true
+                                }
                                 N::Escape => {
                                     if state.selected.is_some() {
                                         state.selected = None;
                                         shell.request_redraw(window::RedrawRequest::NextFrame);
-                                        return (Status::Captured, Some(ViewerEvent::PointSelected(None)));
+                                        return (
+                                            Status::Captured,
+                                            Some(ViewerEvent::PointSelected(None)),
+                                        );
                                     }
                                     false
                                 }
@@ -1092,7 +1186,10 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
 
                     if handled {
                         shell.request_redraw(window::RedrawRequest::NextFrame);
-                        return (Status::Captured, Some(ViewerEvent::CameraChanged(state.camera.clone())));
+                        return (
+                            Status::Captured,
+                            Some(ViewerEvent::CameraChanged(state.camera.clone())),
+                        );
                     }
                 }
                 (Status::Ignored, None)
@@ -1104,7 +1201,7 @@ impl shader::Program<ViewerEvent> for PointCloudProgram {
 
     fn mouse_interaction(
         &self,
-        state:  &Self::State,
+        state: &Self::State,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {

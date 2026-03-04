@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, pick_list, slider, text, text_input, Space};
+use iced::widget::{button, column, container, pick_list, row, slider, text, text_input, Space};
 use iced::{Element, Length, Padding};
 
 use embedding_core::TokenCollection;
@@ -8,6 +8,8 @@ use super::app::Message;
 /// State for the sidebar UI controls.
 #[derive(Debug, Clone)]
 pub struct SidebarState {
+    pub selected_profile: Option<String>,
+    pub profile_name_input: String,
     pub provider_input: String,
     pub model_input: String,
     pub api_key_input: String,
@@ -27,6 +29,8 @@ pub struct SidebarState {
 impl Default for SidebarState {
     fn default() -> Self {
         Self {
+            selected_profile: None,
+            profile_name_input: String::new(),
             provider_input: String::new(),
             model_input: String::new(),
             api_key_input: String::new(),
@@ -45,11 +49,39 @@ const PROJECTIONS: &[&str] = &["PCA", "t-SNE"];
 
 pub fn view<'a>(
     state: &'a SidebarState,
+    profiles: Vec<String>,
     tokens: &'a Option<TokenCollection>,
     loading: bool,
     bubble_size: f32,
 ) -> Element<'a, Message> {
     let is_azure = state.provider_input == "Azure";
+
+    let profile_picker = pick_list(
+        profiles,
+        state.selected_profile.clone(),
+        Message::ProfileSelected,
+    )
+    .width(Length::Fill);
+
+    let profile_name_input = text_input("Profile name", &state.profile_name_input)
+        .on_input(Message::ProfileNameChanged)
+        .width(Length::Fill);
+
+    let save_profile_button = if state.profile_name_input.trim().is_empty() {
+        button(text("Save profile")).width(Length::FillPortion(1))
+    } else {
+        button(text("Save profile"))
+            .on_press(Message::SaveProfilePressed)
+            .width(Length::FillPortion(1))
+    };
+
+    let delete_profile_button = if state.selected_profile.is_none() {
+        button(text("Delete")).width(Length::FillPortion(1))
+    } else {
+        button(text("Delete"))
+            .on_press(Message::DeleteProfilePressed)
+            .width(Length::FillPortion(1))
+    };
 
     let provider_picker = pick_list(
         PROVIDERS.to_vec(),
@@ -88,9 +120,7 @@ pub fn view<'a>(
     };
 
     let token_info = match tokens {
-        Some(collection) => {
-            text(format!("{}: {} tokens", collection.name, collection.len()))
-        }
+        Some(collection) => text(format!("{}: {} tokens", collection.name, collection.len())),
         None => text("No tokens loaded"),
     };
 
@@ -137,10 +167,12 @@ pub fn view<'a>(
         .spacing(4)
         .into()
     } else {
-        let model_input =
-            text_input("Model (e.g. openai/text-embedding-3-small)", &state.model_input)
-                .on_input(Message::ModelChanged)
-                .width(Length::Fill);
+        let model_input = text_input(
+            "Model (e.g. openai/text-embedding-3-small)",
+            &state.model_input,
+        )
+        .on_input(Message::ModelChanged)
+        .width(Length::Fill);
         column![
             text("Model").size(14),
             model_input,
@@ -153,6 +185,11 @@ pub fn view<'a>(
     };
 
     let mut content = column![
+        text("Profiles").size(14),
+        profile_picker,
+        profile_name_input,
+        row![save_profile_button, delete_profile_button,].spacing(6),
+        Space::with_height(12),
         text("Provider").size(14),
         provider_picker,
         Space::with_height(8),
@@ -177,13 +214,15 @@ pub fn view<'a>(
 
     if is_tsne {
         content = content.push(Space::with_height(4));
+        content = content.push(text(format!("Perplexity  {:.0}", state.perplexity_input)).size(14));
         content = content.push(
-            text(format!("Perplexity  {:.0}", state.perplexity_input)).size(14),
-        );
-        content = content.push(
-            slider(5.0_f32..=50.0, state.perplexity_input, Message::PerplexityChanged)
-                .step(1.0_f32)
-                .width(Length::Fill),
+            slider(
+                5.0_f32..=50.0,
+                state.perplexity_input,
+                Message::PerplexityChanged,
+            )
+            .step(1.0_f32)
+            .width(Length::Fill),
         );
     }
 

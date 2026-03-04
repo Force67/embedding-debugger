@@ -6,7 +6,9 @@ use tracing_subscriber::EnvFilter;
 fn main() -> iced::Result {
     // Initialize logging.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("embedding=debug".parse().unwrap()))
+        .with_env_filter(
+            EnvFilter::from_default_env().add_directive("embedding=debug".parse().unwrap()),
+        )
         .init();
 
     tracing::info!("Starting embedding-debugger");
