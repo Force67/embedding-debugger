@@ -267,59 +267,63 @@ fn vs_main(in: VertIn) -> VertOut {
 @fragment
 fn fs_main(in: VertOut) -> @location(0) vec4<f32> {
     let d = length(in.uv);
-    if d > 1.0 { discard; }
+    // Derivative-based edge width keeps circles smooth at all zoom levels.
+    let aa = max(fwidth(d), 1.0 / min(u.viewport.x, u.viewport.y));
+    if d > 1.0 + aa { discard; }
 
     let base = in.color.rgb;
     let sphere_r = 0.7;
+    let fog_color = vec3<f32>(0.03, 0.03, 0.09);
 
-    var rgb: vec3<f32>;
-    var alpha: f32;
+    // Smooth coverage for sphere edge and outer bubble boundary.
+    let sphere_cov = 1.0 - smoothstep(sphere_r - aa, sphere_r + aa, d);
+    let bubble_cov = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, d);
+    let halo_cov = max(0.0, bubble_cov - sphere_cov);
 
-    if d <= sphere_r {
-        // ── Sphere impostor: compute normal from billboard UV ─────────────
-        let s = d / sphere_r;
-        let nz = sqrt(max(0.0, 1.0 - s * s));
-        let normal = normalize(vec3<f32>(in.uv.x / sphere_r, in.uv.y / sphere_r, nz));
+    // ── Sphere impostor: compute normal from billboard UV ─────────────────
+    let s = min(d / sphere_r, 1.0);
+    let nz = sqrt(max(0.0, 1.0 - s * s));
+    let normal = normalize(vec3<f32>(in.uv.x / sphere_r, in.uv.y / sphere_r, nz));
 
-        // Two-light rig for richer shading.
-        let key_dir  = normalize(vec3<f32>(0.5, 0.8, 0.6));
-        let fill_dir = normalize(vec3<f32>(-0.4, -0.1, 0.7));
-        let view_dir = vec3<f32>(0.0, 0.0, 1.0);
+    // Two-light rig for richer shading.
+    let key_dir  = normalize(vec3<f32>(0.5, 0.8, 0.6));
+    let fill_dir = normalize(vec3<f32>(-0.4, -0.1, 0.7));
+    let view_dir = vec3<f32>(0.0, 0.0, 1.0);
 
-        // Diffuse (wrapped slightly for softer falloff).
-        let key_diff  = max(dot(normal, key_dir), 0.0);
-        let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.25;
+    // Diffuse (wrapped slightly for softer falloff).
+    let key_diff  = max(dot(normal, key_dir), 0.0);
+    let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.25;
 
-        // Blinn-Phong specular highlight.
-        let half_v = normalize(key_dir + view_dir);
-        let spec   = pow(max(dot(normal, half_v), 0.0), 64.0);
+    // Blinn-Phong specular highlight.
+    let half_v = normalize(key_dir + view_dir);
+    let spec   = pow(max(dot(normal, half_v), 0.0), 64.0);
 
-        // Fresnel rim gives silhouette definition.
-        let fresnel = pow(1.0 - max(dot(normal, view_dir), 0.0), 3.0);
+    // Fresnel rim gives silhouette definition.
+    let fresnel = pow(1.0 - max(dot(normal, view_dir), 0.0), 3.0);
 
-        // Ambient occlusion hint — darken edges.
-        let ao = smoothstep(0.0, 0.35, nz) * 0.45 + 0.55;
+    // Ambient occlusion hint — darken edges.
+    let ao = smoothstep(0.0, 0.35, nz) * 0.45 + 0.55;
 
-        let ambient = 0.14;
-        rgb = base * (ambient + key_diff * 0.68 + fill_diff) * ao
-            + vec3<f32>(1.0) * spec * 0.50
-            + base * fresnel * 0.22;
+    let ambient = 0.14;
+    let sphere_rgb = base * (ambient + key_diff * 0.68 + fill_diff) * ao
+        + vec3<f32>(1.0) * spec * 0.50
+        + base * fresnel * 0.22;
 
-        // Anti-alias the sphere edge.
-        alpha = smoothstep(sphere_r, sphere_r - 0.025, d);
-    } else {
-        // ── Soft glow halo around the sphere ──────────────────────────────
-        let t    = (d - sphere_r) / (1.0 - sphere_r);
-        let glow = pow(max(0.0, 1.0 - t), 2.6) * 0.30;
-        rgb   = base * 0.45;
-        alpha = glow;
-    }
+    // ── Soft glow halo around the sphere ───────────────────────────────────
+    let t = clamp((d - sphere_r) / (1.0 - sphere_r), 0.0, 1.0);
+    let glow_alpha = pow(1.0 - t, 2.6) * 0.30;
+    let halo_rgb = base * 0.45;
 
     // ── Depth fog: distant points dissolve into dark space ────────────────
-    rgb = mix(vec3<f32>(0.03, 0.03, 0.09), rgb, in.fog);
+    let sphere_rgb_fog = mix(fog_color, sphere_rgb, in.fog);
+    let halo_rgb_fog = mix(fog_color, halo_rgb, in.fog);
 
     // ── Premultiplied alpha output ────────────────────────────────────────
-    return vec4<f32>(rgb * alpha, alpha);
+    let sphere_alpha = sphere_cov;
+    let halo_alpha = glow_alpha * halo_cov;
+    let alpha = min(1.0, sphere_alpha + halo_alpha);
+    let premul_rgb = sphere_rgb_fog * sphere_alpha + halo_rgb_fog * halo_alpha;
+    return vec4<f32>(premul_rgb, alpha);
 }
 "#;
 

@@ -1,4 +1,5 @@
 use nalgebra::{DMatrix, DVector};
+use rayon::prelude::*;
 
 /// A point projected into 3D space for visualization.
 #[derive(Debug, Clone, Copy)]
@@ -55,18 +56,24 @@ impl Projector {
         let n = vectors.len();
         let d = vectors[0].len();
 
-        // Build the data matrix (n x d).
-        let flat: Vec<f32> = vectors.iter().flat_map(|v| v.iter().copied()).collect();
+        // Build the data matrix (n x d) — parallel row fill.
+        let mut flat = vec![0.0f32; n * d];
+        flat.par_chunks_mut(d)
+            .zip(vectors.par_iter())
+            .for_each(|(chunk, v)| chunk.copy_from_slice(v));
         let data = DMatrix::from_row_slice(n, d, &flat);
 
-        // Center the data.
+        // Center the data (parallel row-wise subtraction).
         let mean: DVector<f32> = data.row_mean().transpose();
-        let mut centered = data.clone();
-        for mut row in centered.row_iter_mut() {
-            for j in 0..d {
-                row[j] -= mean[j];
-            }
-        }
+        let mut centered_flat = flat;
+        centered_flat
+            .par_chunks_mut(d)
+            .for_each(|row| {
+                for j in 0..d {
+                    row[j] -= mean[j];
+                }
+            });
+        let centered = DMatrix::from_row_slice(n, d, &centered_flat);
 
         // Covariance matrix (d x d).  For efficiency with large d we use the
         // kernel trick: compute the n×n Gram matrix instead when n < d.
@@ -154,85 +161,81 @@ impl Projector {
             return vec![ProjectedPoint { x: 0.0, y: 0.0, z: 0.0, index: 0 }];
         }
 
-        // ── Step 1: Pairwise squared Euclidean distances ─────────────────────
+        // ── Step 1: Pairwise squared Euclidean distances (parallel) ──────────
         let mut dist2 = vec![0.0f32; n * n];
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let sq: f32 = vectors[i]
-                    .iter()
-                    .zip(vectors[j].iter())
-                    .map(|(a, b)| (a - b) * (a - b))
-                    .sum();
-                dist2[i * n + j] = sq;
-                dist2[j * n + i] = sq;
-            }
-        }
+        // Each row i is independent — compute in parallel.
+        dist2
+            .par_chunks_mut(n)
+            .enumerate()
+            .for_each(|(i, row)| {
+                for j in 0..n {
+                    if j != i {
+                        let sq: f32 = vectors[i]
+                            .iter()
+                            .zip(vectors[j].iter())
+                            .map(|(a, b)| (a - b) * (a - b))
+                            .sum();
+                        row[j] = sq;
+                    }
+                }
+            });
 
-        // ── Step 2: High-dim conditional probabilities (perplexity search) ───
-        // Clamp perplexity to a reasonable range for the dataset size.
+        // ── Step 2: High-dim conditional probabilities (parallel per row) ─────
         let perp = params.perplexity.min((n - 1) as f32 * 0.5).max(2.0);
         let target_entropy = perp.ln();
 
-        let mut p_cond = vec![0.0f32; n * n]; // row-normalised P(j|i)
-        for i in 0..n {
-            let mut beta_lo = f32::NEG_INFINITY;
-            let mut beta_hi = f32::INFINITY;
-            let mut beta = 1.0_f32;
-            let mut p_row = vec![0.0f32; n];
+        let mut p_cond = vec![0.0f32; n * n];
+        p_cond
+            .par_chunks_mut(n)
+            .enumerate()
+            .for_each(|(i, p_row)| {
+                let dist_row = &dist2[i * n..(i + 1) * n];
+                let mut beta_lo = f32::NEG_INFINITY;
+                let mut beta_hi = f32::INFINITY;
+                let mut beta = 1.0_f32;
+                let mut row = vec![0.0f32; n];
 
-            for _ in 0..50 {
-                let mut z = 0.0_f32;
-                for j in 0..n {
-                    if j != i {
-                        p_row[j] = (-beta * dist2[i * n + j]).exp();
-                        z += p_row[j];
+                for _ in 0..50 {
+                    let mut z = 0.0_f32;
+                    for j in 0..n {
+                        if j != i {
+                            row[j] = (-beta * dist_row[j]).exp();
+                            z += row[j];
+                        }
+                    }
+                    if z < f32::EPSILON { z = f32::EPSILON; }
+
+                    let mut h = z.ln();
+                    for j in 0..n {
+                        if j != i {
+                            h += beta * dist_row[j] * row[j] / z;
+                        }
+                    }
+                    for j in 0..n { row[j] /= z; }
+
+                    let diff = h - target_entropy;
+                    if diff.abs() < 1e-5 { break; }
+                    if diff > 0.0 {
+                        beta_lo = beta;
+                        beta = if beta_hi.is_infinite() { beta * 2.0 } else { (beta + beta_hi) / 2.0 };
+                    } else {
+                        beta_hi = beta;
+                        beta = if beta_lo.is_infinite() { beta / 2.0 } else { (beta + beta_lo) / 2.0 };
                     }
                 }
-                if z < f32::EPSILON {
-                    z = f32::EPSILON;
-                }
-
-                // Shannon entropy H = log Z + beta * E_p[d²]
-                let mut h = z.ln();
-                for j in 0..n {
-                    if j != i {
-                        h += beta * dist2[i * n + j] * p_row[j] / z;
-                    }
-                }
-
-                // Normalise before checking convergence.
-                for j in 0..n {
-                    p_row[j] /= z;
-                }
-
-                let diff = h - target_entropy;
-                if diff.abs() < 1e-5 {
-                    break;
-                }
-                if diff > 0.0 {
-                    // Entropy too high → sharpen Gaussian (increase beta).
-                    beta_lo = beta;
-                    beta = if beta_hi.is_infinite() { beta * 2.0 } else { (beta + beta_hi) / 2.0 };
-                } else {
-                    // Entropy too low → widen Gaussian (decrease beta).
-                    beta_hi = beta;
-                    beta = if beta_lo.is_infinite() { beta / 2.0 } else { (beta + beta_lo) / 2.0 };
-                }
-            }
-
-            for j in 0..n {
-                p_cond[i * n + j] = p_row[j];
-            }
-        }
+                p_row.copy_from_slice(&row);
+            });
 
         // ── Step 3: Symmetrise P_ij = (P(j|i) + P(i|j)) / 2n ───────────────
         let mut p = vec![0.0f32; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                let v = (p_cond[i * n + j] + p_cond[j * n + i]) / (2.0 * n as f32);
-                p[i * n + j] = v.max(1e-12);
-            }
-        }
+        p.par_chunks_mut(n)
+            .enumerate()
+            .for_each(|(i, row)| {
+                for j in 0..n {
+                    let v = (p_cond[i * n + j] + p_cond[j * n + i]) / (2.0 * n as f32);
+                    row[j] = v.max(1e-12);
+                }
+            });
 
         // ── Step 4: Initialise Y from PCA (scaled small for stability) ───────
         let pca_pts = Self::pca(vectors);
@@ -244,56 +247,58 @@ impl Projector {
         // ── Step 5: Gradient descent ─────────────────────────────────────────
         let mut gains = vec![[1.0_f32; 3]; n];
         let mut vel = vec![[0.0_f32; 3]; n];
+        // Reusable buffer for Q numerators, reset each iteration.
+        let mut q_num = vec![0.0_f32; n * n];
 
         for iter in 0..params.iterations {
-            // Early exaggeration for the first 250 iterations.
             let exag: f32 = if iter < 250 { 12.0 } else { 1.0 };
             let momentum: f32 = if iter < 250 { 0.5 } else { 0.8 };
 
-            // Low-dim affinities Q (Student t, unnormalised numerator).
-            let mut q_num = vec![0.0_f32; n * n];
-            let mut sum_q = 0.0_f32;
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    let dx = y[i][0] - y[j][0];
-                    let dy = y[i][1] - y[j][1];
-                    let dz = y[i][2] - y[j][2];
-                    let v = 1.0 / (1.0 + dx * dx + dy * dy + dz * dz);
-                    q_num[i * n + j] = v;
-                    q_num[j * n + i] = v;
-                    sum_q += 2.0 * v;
-                }
-            }
-            if sum_q < f32::EPSILON {
-                sum_q = f32::EPSILON;
-            }
-
-            // Gradient: dKL/dy_i = 4 Σ_j (p_ij - q_ij) * q_num_ij * (y_i - y_j)
-            let mut grad = vec![[0.0_f32; 3]; n];
-            for i in 0..n {
-                for j in 0..n {
-                    if i != j {
-                        let q_ij = (q_num[i * n + j] / sum_q).max(1e-12);
-                        let factor =
-                            4.0 * (exag * p[i * n + j] - q_ij) * q_num[i * n + j];
-                        for k in 0..3 {
-                            grad[i][k] += factor * (y[i][k] - y[j][k]);
+            // Low-dim affinities Q — each row computed independently (no cross-row reads).
+            q_num
+                .par_chunks_mut(n)
+                .enumerate()
+                .for_each(|(i, row)| {
+                    for j in 0..n {
+                        if j != i {
+                            let dx = y[i][0] - y[j][0];
+                            let dy = y[i][1] - y[j][1];
+                            let dz = y[i][2] - y[j][2];
+                            row[j] = 1.0 / (1.0 + dx * dx + dy * dy + dz * dz);
+                        } else {
+                            row[j] = 0.0;
                         }
                     }
-                }
-            }
+                });
+            // sum of all non-diagonal entries = 2 * Σ_{i<j} q_{ij}, same as original.
+            let sum_q = q_num.par_iter().sum::<f32>().max(f32::EPSILON);
 
-            // Adaptive gains + velocity update.
+            // Gradient — parallel over i, each writes only grad[i].
+            let grad: Vec<[f32; 3]> = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let mut g = [0.0_f32; 3];
+                    let p_row = &p[i * n..(i + 1) * n];
+                    let q_row = &q_num[i * n..(i + 1) * n];
+                    for j in 0..n {
+                        if j != i {
+                            let q_ij = (q_row[j] / sum_q).max(1e-12);
+                            let factor = 4.0 * (exag * p_row[j] - q_ij) * q_row[j];
+                            g[0] += factor * (y[i][0] - y[j][0]);
+                            g[1] += factor * (y[i][1] - y[j][1]);
+                            g[2] += factor * (y[i][2] - y[j][2]);
+                        }
+                    }
+                    g
+                })
+                .collect();
+
+            // Adaptive gains + velocity (sequential, cheap).
             for i in 0..n {
                 for k in 0..3 {
                     let same_sign = (grad[i][k] > 0.0) == (vel[i][k] > 0.0);
-                    gains[i][k] = if same_sign {
-                        (gains[i][k] * 0.8).max(0.01)
-                    } else {
-                        gains[i][k] + 0.2
-                    };
-                    vel[i][k] = momentum * vel[i][k]
-                        - params.learning_rate * gains[i][k] * grad[i][k];
+                    gains[i][k] = if same_sign { (gains[i][k] * 0.8).max(0.01) } else { gains[i][k] + 0.2 };
+                    vel[i][k] = momentum * vel[i][k] - params.learning_rate * gains[i][k] * grad[i][k];
                     y[i][k] += vel[i][k];
                 }
             }
@@ -301,9 +306,7 @@ impl Projector {
             // Re-centre Y.
             for k in 0..3 {
                 let mean = y.iter().map(|pt| pt[k]).sum::<f32>() / n as f32;
-                for pt in y.iter_mut() {
-                    pt[k] -= mean;
-                }
+                for pt in y.iter_mut() { pt[k] -= mean; }
             }
         }
 
@@ -311,6 +314,98 @@ impl Projector {
             .enumerate()
             .map(|(i, pt)| ProjectedPoint { x: pt[0], y: pt[1], z: pt[2], index: i })
             .collect()
+    }
+
+    /// Assign each projected point to one of `k` clusters using k-means (Lloyd's
+    /// algorithm).  Returns a `Vec<usize>` of cluster indices, one per point.
+    /// Falls back gracefully when `n < k` by capping k at n.
+    pub fn kmeans(points: &[ProjectedPoint], k: usize) -> Vec<usize> {
+        let n = points.len();
+        if n == 0 || k == 0 {
+            return Vec::new();
+        }
+        let k = k.min(n);
+
+        // Initialise centroids with k-means++ seeding for better convergence.
+        let mut centroids: Vec<[f32; 3]> = Vec::with_capacity(k);
+        // Pick the first centroid at index 0 (deterministic).
+        centroids.push([points[0].x, points[0].y, points[0].z]);
+
+        for _ in 1..k {
+            // For each point compute its distance to the nearest existing centroid.
+            let dists: Vec<f32> = points
+                .iter()
+                .map(|p| {
+                    centroids
+                        .iter()
+                        .map(|c| {
+                            let dx = p.x - c[0];
+                            let dy = p.y - c[1];
+                            let dz = p.z - c[2];
+                            dx * dx + dy * dy + dz * dz
+                        })
+                        .fold(f32::MAX, f32::min)
+                })
+                .collect();
+
+            // Pick the point with the maximum distance (deterministic approximation).
+            let next = dists
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            centroids.push([points[next].x, points[next].y, points[next].z]);
+        }
+
+        let mut assignments = vec![0usize; n];
+
+        for _ in 0..100 {
+            // Assignment step.
+            let mut changed = false;
+            for (i, p) in points.iter().enumerate() {
+                let nearest = centroids
+                    .iter()
+                    .enumerate()
+                    .map(|(ci, c)| {
+                        let dx = p.x - c[0];
+                        let dy = p.y - c[1];
+                        let dz = p.z - c[2];
+                        (ci, dx * dx + dy * dy + dz * dz)
+                    })
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                    .map(|(ci, _)| ci)
+                    .unwrap_or(0);
+                if assignments[i] != nearest {
+                    assignments[i] = nearest;
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
+            }
+
+            // Update step.
+            let mut sums = vec![[0.0f32; 3]; k];
+            let mut counts = vec![0usize; k];
+            for (i, p) in points.iter().enumerate() {
+                let c = assignments[i];
+                sums[c][0] += p.x;
+                sums[c][1] += p.y;
+                sums[c][2] += p.z;
+                counts[c] += 1;
+            }
+            for ci in 0..k {
+                if counts[ci] > 0 {
+                    centroids[ci][0] = sums[ci][0] / counts[ci] as f32;
+                    centroids[ci][1] = sums[ci][1] / counts[ci] as f32;
+                    centroids[ci][2] = sums[ci][2] / counts[ci] as f32;
+                }
+            }
+        }
+
+        assignments
     }
 
     /// Normalize projected points to fit within a [-1, 1] cube.

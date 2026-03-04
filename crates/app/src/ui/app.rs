@@ -4,7 +4,9 @@ use iced::{Application, Command, Element, Length, Theme, Color};
 use embedding_core::{EmbeddingSet, ProjectedPoint, ProjectionMethod, Projector, TsneParams, TokenCollection};
 use embedding_inference::{EmbeddingClient, ProviderConfig, ProviderKind};
 use embedding_viz::{ArcballCamera, PointCloud, PointSelection};
+use tracing::warn;
 
+use super::credentials;
 use super::sidebar;
 use super::status_bar;
 use super::viewer;
@@ -101,13 +103,21 @@ impl Application for App {
     type Flags = ();
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
+        let mut provider_config = ProviderConfig::default();
+        let cached_key = credentials::load_api_key(provider_config.kind);
+        provider_config.api_key = cached_key.clone();
+
+        let mut sidebar = sidebar::SidebarState::default();
+        sidebar.provider_input = provider_config.kind.to_string();
+        sidebar.api_key_input = cached_key.unwrap_or_default();
+
         let app = Self {
-            provider_config: ProviderConfig::default(),
+            provider_config,
             tokens: None,
             embeddings: None,
             projected: Vec::new(),
             point_cloud: PointCloud::default(),
-            sidebar: sidebar::SidebarState::default(),
+            sidebar,
             status: "Ready — load a token collection to get started.".into(),
             loading: false,
             projecting: false,
@@ -145,6 +155,8 @@ impl Application for App {
                         _ => "openai/text-embedding-3-small".into(),
                     };
                 }
+                self.provider_config.api_key = credentials::load_api_key(self.provider_config.kind);
+                self.sidebar.api_key_input = self.provider_config.api_key.clone().unwrap_or_default();
                 self.sidebar.provider_input = provider;
                 Command::none()
             }
@@ -156,6 +168,16 @@ impl Application for App {
             Message::ApiKeyChanged(key) => {
                 self.provider_config.api_key = if key.is_empty() { None } else { Some(key.clone()) };
                 self.sidebar.api_key_input = key;
+                if let Err(e) = credentials::store_api_key(
+                    self.provider_config.kind,
+                    &self.sidebar.api_key_input,
+                ) {
+                    warn!(
+                        provider = %self.provider_config.kind,
+                        error = %e,
+                        "Failed to persist API key in OS keyring"
+                    );
+                }
                 Command::none()
             }
             Message::DimensionsChanged(dims) => {
@@ -378,7 +400,7 @@ impl Application for App {
                 Projector::normalize(&mut pts);
                 let n = pts.len();
                 self.projected = pts;
-                let colors = self.category_colors();
+                let colors = self.cluster_colors();
                 self.point_cloud.set_points(&self.projected, &colors);
                 self.status = format!(
                     "Showing {n} points in 3D ({method}). Drag to rotate, scroll to zoom.",
@@ -425,8 +447,8 @@ impl Application for App {
 }
 
 impl App {
-    /// Generate a color for each token based on its category.
-    fn category_colors(&self) -> Vec<Color> {
+    /// Color each token by its k-means cluster in the projected 3D space.
+    fn cluster_colors(&self) -> Vec<Color> {
         let palette = [
             Color::from_rgb(0.4, 0.7, 1.0),
             Color::from_rgb(1.0, 0.5, 0.3),
@@ -438,30 +460,15 @@ impl App {
             Color::from_rgb(0.9, 0.6, 0.2),
         ];
 
-        let tokens = match &self.tokens {
-            Some(t) => &t.tokens,
-            None => return Vec::new(),
-        };
-
-        let mut categories: Vec<String> = Vec::new();
-        for token in tokens {
-            if let Some(ref cat) = token.category {
-                if !categories.contains(cat) {
-                    categories.push(cat.clone());
-                }
-            }
+        if self.projected.is_empty() {
+            return Vec::new();
         }
 
-        tokens
+        let k = palette.len().min(self.projected.len());
+        let assignments = Projector::kmeans(&self.projected, k);
+        assignments
             .iter()
-            .map(|token| {
-                if let Some(ref cat) = token.category {
-                    let idx = categories.iter().position(|c| c == cat).unwrap_or(0);
-                    palette[idx % palette.len()]
-                } else {
-                    Color::WHITE
-                }
-            })
+            .map(|&cluster| palette[cluster % palette.len()])
             .collect()
     }
 

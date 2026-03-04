@@ -36,5 +36,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Math / linear algebra
 nalgebra = "0.33"
 
+# Parallelism
+rayon = "1"
+
 # LLM inference
 denkwerk = { git = "https://github.com/Force67/denkwerk" }

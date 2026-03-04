@@ -15,21 +15,11 @@ pub enum TokenError {
 pub struct Token {
     /// The text content of the token.
     pub text: String,
-    /// Optional category/group for coloring in the visualization.
-    pub category: Option<String>,
 }
 
 impl Token {
     pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            category: None,
-        }
-    }
-
-    pub fn with_category(mut self, category: impl Into<String>) -> Self {
-        self.category = Some(category.into());
-        self
+        Self { text: text.into() }
     }
 }
 
@@ -59,9 +49,9 @@ impl TokenCollection {
     /// {
     ///   "name": "Sample Collection",
     ///   "tokens": [
-    ///     { "text": "king", "category": "royalty" },
-    ///     { "text": "queen", "category": "royalty" },
-    ///     { "text": "apple", "category": "fruit" }
+    ///     { "text": "king" },
+    ///     { "text": "queen" },
+    ///     { "text": "apple" }
     ///   ]
     /// }
     /// ```

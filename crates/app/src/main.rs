@@ -13,6 +13,7 @@ fn main() -> iced::Result {
 
     let mut settings = Settings::default();
     settings.window.size = iced::Size::new(1280.0, 800.0);
+    settings.antialiasing = true;
 
     ui::app::App::run(settings)
 }
