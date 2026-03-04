@@ -103,7 +103,7 @@ pub fn view<'a>(
         .on_input(Message::DimensionsChanged)
         .width(Length::Fill);
 
-    let load_button = button(text("📂 Load from file"))
+    let load_button = button(text("Load from file"))
         .on_press(Message::LoadTokensPressed)
         .width(Length::Fill);
 

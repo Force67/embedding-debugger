@@ -7,3 +7,6 @@ Goal is to be able to quickly browse a lot of embedding points in 3D space (with
 ### Building
 
 "cargo run" it!
+
+
+![screenshot](./docs/screenshot.png)

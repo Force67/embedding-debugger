@@ -125,13 +125,22 @@ fn axis_arrow(view_dir: [f32; 3]) -> &'static str {
     let (vx, vy, vz) = (view_dir[0], view_dir[1], view_dir[2]);
     if vz.abs() > 0.72 {
         if vz > 0.0 {
-            "⊙ toward"
+            "toward"
         } else {
-            "⊗ away"
+            "away"
         }
     } else {
         let angle = vy.atan2(vx);
-        let arrows = ["→", "↗", "↑", "↖", "←", "↙", "↓", "↘"];
+        let arrows = [
+            "right",
+            "up-right",
+            "up",
+            "up-left",
+            "left",
+            "down-left",
+            "down",
+            "down-right",
+        ];
         let idx = (angle / std::f32::consts::FRAC_PI_4).round() as i32;
         arrows[idx.rem_euclid(8) as usize]
     }
@@ -233,7 +242,7 @@ fn build_diagnostics_panel<'a>(
 fn build_controls_hint<'a>() -> Element<'a, Message> {
     column![
         text("Controls").size(11),
-        text("↑↓←→  Rotate").size(10),
+        text("Arrow keys Rotate").size(10),
         text("WASD   Pan").size(10),
         text("Q/E    Zoom").size(10),
         text("Scroll Zoom").size(10),
